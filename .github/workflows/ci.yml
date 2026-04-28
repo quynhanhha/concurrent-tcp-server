@@ -1,0 +1,7 @@
+name: Project 2 Visible Tests
+on:
+  push:
+
+jobs:
+  test:
+    uses: feit-comp30023-2026/project-workflows/.github/workflows/proj2.yml@main
