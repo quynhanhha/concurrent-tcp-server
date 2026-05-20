@@ -13,6 +13,9 @@
 /* Bytes sent on the wire per ship: COORD_SIZE + 1 (length) + 1 (direction). */
 #define SHIP_WIRE_SIZE (COORD_SIZE + 2)
 
+/* Bytes in a MSG_OPPONENT_MOVE payload: coordinate + 1-byte TurnResult. */
+#define OPPONENT_MOVE_WIRE_SIZE (COORD_SIZE + 1)
+
 /* ── Message types ──────────────────────────────────────────────────────── */
 
 typedef enum {

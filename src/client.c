@@ -145,8 +145,27 @@ int8_t client_send_ships(ClientImplementation *client,
 
 enum TurnResult client_send_move(ClientImplementation *client, const char *coordinate) {
     if (!client) return Invalid;
-    (void)coordinate;
-    return Invalid;
+    Client *c = (Client *)client;
+    if (c->sockfd < 0) return Invalid;
+
+    uint8_t coord_buf[COORD_SIZE] = {0};
+    strncpy((char *)coord_buf, coordinate, COORD_SIZE - 1);
+
+    if (send_msg(c->sockfd, MSG_MOVE_SUBMIT, STATUS_OK,
+                 coord_buf, COORD_SIZE) < 0) return Invalid;
+
+    MsgHeader hdr;
+    void *payload = NULL;
+    if (receive_msg(c->sockfd, &hdr, &payload) < 0) return Invalid;
+
+    if (hdr.type != MSG_MOVE_RESULT || hdr.length != 1 || payload == NULL) {
+        free(payload);
+        return Invalid;
+    }
+
+    TurnResult result = (TurnResult)(int8_t)((uint8_t *)payload)[0];
+    free(payload);
+    return result;
 }
 
 struct ExtendedTurnResult client_send_move_extended(ClientImplementation *client,
@@ -160,6 +179,27 @@ struct ExtendedTurnResult client_send_move_extended(ClientImplementation *client
 struct MoveResult client_receive_move(ClientImplementation *client) {
     struct MoveResult r = {NULL, Invalid};
     if (!client) return r;
+    Client *c = (Client *)client;
+    if (c->sockfd < 0) return r;
+
+    MsgHeader hdr;
+    void *payload = NULL;
+    if (receive_msg(c->sockfd, &hdr, &payload) < 0) return r;
+
+    if (hdr.type != MSG_OPPONENT_MOVE ||
+        hdr.length != OPPONENT_MOVE_WIRE_SIZE || payload == NULL) {
+        free(payload);
+        return r;
+    }
+
+    char *coord = malloc(COORD_SIZE);
+    if (!coord) { free(payload); return r; }
+    memcpy(coord, payload, COORD_SIZE);
+    coord[COORD_SIZE - 1] = '\0';
+
+    r.coordinate = coord;
+    r.result     = (TurnResult)(int8_t)((uint8_t *)payload)[COORD_SIZE];
+    free(payload);
     return r;
 }
 

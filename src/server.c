@@ -69,7 +69,7 @@ static void deserialize_ships(const uint8_t *buf, Ship ships[4],
     }
 }
 
-/* All mutable state for one game instance. */
+/* All states for a game. */
 typedef struct {
     uint32_t game_id;
     int      p1_fd;
@@ -192,13 +192,73 @@ static void run_game(Engine *engine, int listen_fd) {
         g.current_turn = 1;  /* Player 1 moves first. */
     }
 
-    /* TODO Phase 6: gameplay loop */
-    /* Block until a client sends a move or disconnects. */
-    {
+    /* Gameplay loop: alternate turns until one player wins */
+    while (!g.game_over) {
+        int active_fd = (g.current_turn == 1) ? g.p1_fd : g.p2_fd;
+        int other_fd  = (g.current_turn == 1) ? g.p2_fd : g.p1_fd;
+
+        MsgHeader hdr = {0};
         void *payload = NULL;
-        MsgHeader hdr;
-        receive_msg(g.p1_fd, &hdr, &payload);
+
+        /* Receive the move; check receive success before reading hdr fields. */
+        if (receive_msg(active_fd, &hdr, &payload) < 0) {
+            fprintf(stderr, "receive_msg failed for player %d\n", g.current_turn);
+            free(payload);
+            send_msg(active_fd, MSG_ERROR, STATUS_PROTOCOL_ERROR, NULL, 0);
+            send_msg(other_fd,  MSG_ERROR, STATUS_PROTOCOL_ERROR, NULL, 0);
+            goto game_end;
+        }
+        if (hdr.type != MSG_MOVE_SUBMIT || hdr.length != COORD_SIZE) {
+            fprintf(stderr, "Bad MSG_MOVE_SUBMIT from player %d "
+                    "(type=%d len=%u)\n", g.current_turn, hdr.type, hdr.length);
+            free(payload);
+            send_msg(active_fd, MSG_ERROR, STATUS_PROTOCOL_ERROR, NULL, 0);
+            send_msg(other_fd,  MSG_ERROR, STATUS_PROTOCOL_ERROR, NULL, 0);
+            goto game_end;
+        }
+
+        char coord[COORD_SIZE];
+        memcpy(coord, payload, COORD_SIZE);
+        coord[COORD_SIZE - 1] = '\0';
         free(payload);
+
+        TurnResult result = engine_take_turn(engine, g.game_id,
+                                             g.current_turn, coord);
+
+        /* Engine signals an invalid/failed turn — notify both and abort. */
+        if (result == Invalid) {
+            fprintf(stderr, "engine_take_turn returned Invalid for player %d "
+                    "coord=%s\n", g.current_turn, coord);
+            send_msg(active_fd, MSG_ERROR, STATUS_ENGINE_FAIL, NULL, 0);
+            send_msg(other_fd,  MSG_ERROR, STATUS_ENGINE_FAIL, NULL, 0);
+            goto game_end;
+        }
+
+        /* Reply to the active player. */
+        uint8_t result_byte = (uint8_t)result;
+        if (send_msg(active_fd, MSG_MOVE_RESULT, STATUS_OK,
+                     &result_byte, 1) < 0) {
+            send_msg(other_fd, MSG_ERROR, STATUS_DISCONNECTED, NULL, 0);
+            goto game_end;
+        }
+
+        /* Notify the other player of the move and its outcome. */
+        uint8_t opp_buf[OPPONENT_MOVE_WIRE_SIZE];
+        memcpy(opp_buf, coord, COORD_SIZE);
+        opp_buf[COORD_SIZE] = result_byte;
+        if (send_msg(other_fd, MSG_OPPONENT_MOVE, STATUS_OK,
+                     opp_buf, OPPONENT_MOVE_WIRE_SIZE) < 0) {
+            goto game_end;
+        }
+
+        fprintf(stderr, "Turn: player %d coord=%s result=%d\n",
+                g.current_turn, coord, (int)result);
+
+        if (result == Win) {
+            g.game_over = 1;
+        } else {
+            g.current_turn = (g.current_turn == 1) ? 2 : 1;
+        }
     }
 
 game_end:
