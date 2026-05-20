@@ -33,13 +33,13 @@ typedef enum {
 /* ── Status codes ───────────────────────────────────────────────────────── */
 
 typedef enum {
-    STATUS_OK            = 0,
-    STATUS_FAIL          = 1,
-    STATUS_BAD_REQUEST   = 2,
-    STATUS_GAME_FULL     = 3,
-    STATUS_NOT_YOUR_TURN = 4,
-    STATUS_ENGINE_FAIL   = 5,
-    STATUS_DISCONNECTED  = 6,
+    STATUS_OK             = 0,
+    STATUS_FAIL           = 1,
+    STATUS_PROTOCOL_ERROR = 2,  
+    STATUS_GAME_FULL      = 3,
+    STATUS_NOT_YOUR_TURN  = 4,
+    STATUS_ENGINE_FAIL    = 5,
+    STATUS_DISCONNECTED   = 6,
 } StatusCode;
 
 /* ── Message header ─────────────────────────────────────────────────────── */
@@ -62,7 +62,7 @@ typedef struct {
 
 #define MSG_HEADER_SIZE 4  /* sizeof(MsgHeader) as sent on the wire */
 
-/* ── Reliable I/O ───────────────────────────────────────────────────────── */
+/* ── Exact socket I/O ───────────────────────────────────────────────────────── */
 
 /*
  * Read exactly n bytes from fd into buf.
@@ -89,6 +89,6 @@ int send_msg(int fd, uint8_t type, uint8_t status, const void *payload, uint16_t
  * buffer of hdr.length bytes (caller must free), or NULL if length is 0.
  * Returns 0 on success, 0-on-EOF returns -1, -1 on error.
  */
-int recv_msg(int fd, MsgHeader *out_hdr, void **out_payload);
+int receive_msg(int fd, MsgHeader *out_hdr, void **out_payload);
 
 #endif /* COMMON_H */
