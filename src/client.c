@@ -65,7 +65,7 @@ bool client_connect(ClientImplementation *client, const char *addr, uint16_t por
     }
 
     /* Wait for JOIN_ACCEPTED. */
-    MsgHeader hdr;
+    MsgHeader hdr = {0};
     void *payload = NULL;
     if (receive_msg(fd, &hdr, &payload) < 0) {
         close(fd);
@@ -74,7 +74,9 @@ bool client_connect(ClientImplementation *client, const char *addr, uint16_t por
     free(payload);
     payload = NULL;
 
-    if (hdr.type != MSG_JOIN_ACCEPTED) {
+    if (hdr.type != MSG_JOIN_ACCEPTED ||
+        hdr.status != STATUS_OK ||
+        hdr.length != 0) {
         close(fd);
         return false;
     }
@@ -101,17 +103,19 @@ bool client_wait_for_opponent(ClientImplementation *client) {
     Client *c = (Client *)client;
     if (c->sockfd < 0) return false;
 
-    MsgHeader hdr;
+    MsgHeader hdr = {0};
     void *payload = NULL;
     if (receive_msg(c->sockfd, &hdr, &payload) < 0) return false;
     free(payload);
 
-    return hdr.type == MSG_GAME_READY;
+    return hdr.type   == MSG_GAME_READY &&
+           hdr.status == STATUS_OK      &&
+           hdr.length == 0;
 }
 
 int8_t client_send_ships(ClientImplementation *client,
                          const struct Ship (*ships)[4]) {
-    if (!client) return -1;
+    if (!client || !ships) return -1;
     Client *c = (Client *)client;
     if (c->sockfd < 0) return -1;
 
@@ -128,23 +132,27 @@ int8_t client_send_ships(ClientImplementation *client,
     if (send_msg(c->sockfd, MSG_SHIP_SUBMIT, STATUS_OK,
                  buf, (uint16_t)sizeof(buf)) < 0) return -1;
 
-    MsgHeader hdr;
+    MsgHeader hdr = {0};
     void *payload = NULL;
     if (receive_msg(c->sockfd, &hdr, &payload) < 0) return -1;
 
-    if (hdr.type != MSG_SHIP_RESULT || hdr.length != 1 || payload == NULL) {
+    if (hdr.type != MSG_SHIP_RESULT || hdr.status != STATUS_OK ||
+        hdr.length != 1 || payload == NULL) {
         free(payload);
         return -1;
     }
 
     int8_t player_num = (int8_t)((uint8_t *)payload)[0];
     free(payload);
+
+    if (player_num != 1 && player_num != 2) return -1;
+
     c->player_num = player_num;
     return player_num;
 }
 
 enum TurnResult client_send_move(ClientImplementation *client, const char *coordinate) {
-    if (!client) return Invalid;
+    if (!client || !coordinate) return Invalid;
     Client *c = (Client *)client;
     if (c->sockfd < 0) return Invalid;
 
@@ -154,11 +162,12 @@ enum TurnResult client_send_move(ClientImplementation *client, const char *coord
     if (send_msg(c->sockfd, MSG_MOVE_SUBMIT, STATUS_OK,
                  coord_buf, COORD_SIZE) < 0) return Invalid;
 
-    MsgHeader hdr;
+    MsgHeader hdr = {0};
     void *payload = NULL;
     if (receive_msg(c->sockfd, &hdr, &payload) < 0) return Invalid;
 
-    if (hdr.type != MSG_MOVE_RESULT || hdr.length != 1 || payload == NULL) {
+    if (hdr.type != MSG_MOVE_RESULT || hdr.status != STATUS_OK ||
+        hdr.length != 1 || payload == NULL) {
         free(payload);
         return Invalid;
     }
@@ -182,11 +191,11 @@ struct MoveResult client_receive_move(ClientImplementation *client) {
     Client *c = (Client *)client;
     if (c->sockfd < 0) return r;
 
-    MsgHeader hdr;
+    MsgHeader hdr = {0};
     void *payload = NULL;
     if (receive_msg(c->sockfd, &hdr, &payload) < 0) return r;
 
-    if (hdr.type != MSG_OPPONENT_MOVE ||
+    if (hdr.type != MSG_OPPONENT_MOVE || hdr.status != STATUS_OK ||
         hdr.length != OPPONENT_MOVE_WIRE_SIZE || payload == NULL) {
         free(payload);
         return r;
