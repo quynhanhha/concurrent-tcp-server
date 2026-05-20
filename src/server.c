@@ -90,13 +90,21 @@ typedef struct {
 static void run_game(Engine *engine, int listen_fd) {
     GameState g = {0, -1, -1, 0, 0, 0};
 
-    /* Accept Player 1: read JOIN only */
+    /* Accept Player 1: any game_id is valid as the session's ID.
+     * Send JOIN_ACCEPTED immediately so client_connect can return
+     * without waiting for a second player to connect. */
     uint32_t p1_game_id = 0;
     g.p1_fd = accept_and_read_join(listen_fd, &p1_game_id);
     if (g.p1_fd < 0) return;
     g.game_id = p1_game_id;
 
-    /* Accept Player 2: read JOIN only */
+    if (send_msg(g.p1_fd, MSG_JOIN_ACCEPTED, STATUS_OK, NULL, 0) < 0) {
+        close(g.p1_fd);
+        return;
+    }
+    fprintf(stderr, "P1 joined (game_id=%u, fd=%d)\n", g.game_id, g.p1_fd);
+
+    /* Accept Player 2: must present the same game_id as P1. */
     uint32_t p2_game_id = 0;
     g.p2_fd = accept_and_read_join(listen_fd, &p2_game_id);
     if (g.p2_fd < 0) {
@@ -105,26 +113,22 @@ static void run_game(Engine *engine, int listen_fd) {
         return;
     }
 
-    /* Reject P2 (and clean up P1) if game IDs don't match */
     if (p2_game_id != g.game_id) {
         fprintf(stderr, "Game ID mismatch: P1=%u P2=%u\n", g.game_id, p2_game_id);
-        send_msg(g.p1_fd, MSG_JOIN_REJECTED, STATUS_PROTOCOL_ERROR, NULL, 0);
         send_msg(g.p2_fd, MSG_JOIN_REJECTED, STATUS_PROTOCOL_ERROR, NULL, 0);
+        send_msg(g.p1_fd, MSG_ERROR, STATUS_PROTOCOL_ERROR, NULL, 0);
         close(g.p2_fd);
         close(g.p1_fd);
         return;
     }
 
-    /* Both players have matching game IDs, accept both */
-    if (send_msg(g.p1_fd, MSG_JOIN_ACCEPTED, STATUS_OK, NULL, 0) < 0 ||
-        send_msg(g.p2_fd, MSG_JOIN_ACCEPTED, STATUS_OK, NULL, 0) < 0) {
-        fprintf(stderr, "Failed to send JOIN_ACCEPTED\n");
+    if (send_msg(g.p2_fd, MSG_JOIN_ACCEPTED, STATUS_OK, NULL, 0) < 0) {
+        send_msg(g.p1_fd, MSG_ERROR, STATUS_PROTOCOL_ERROR, NULL, 0);
         close(g.p2_fd);
         close(g.p1_fd);
         return;
     }
-    fprintf(stderr, "Both players joined (game_id=%u, P1=fd%d P2=fd%d)\n",
-            g.game_id, g.p1_fd, g.p2_fd);
+    fprintf(stderr, "P2 joined (game_id=%u, fd=%d)\n", p2_game_id, g.p2_fd);
 
     /* Initialise engine game */
     if (!engine_init_game(engine, g.game_id)) {
