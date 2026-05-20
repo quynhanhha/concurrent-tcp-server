@@ -180,8 +180,27 @@ enum TurnResult client_send_move(ClientImplementation *client, const char *coord
 struct ExtendedTurnResult client_send_move_extended(ClientImplementation *client,
                                                     const char *coordinate) {
     struct ExtendedTurnResult r = {0, NULL};
-    if (!client) return r;
-    (void)coordinate;
+    if (!client || !coordinate) return r;
+    Client *c = (Client *)client;
+    if (c->sockfd < 0) return r;
+
+    uint8_t coord_buf[COORD_SIZE] = {0};
+    strncpy((char *)coord_buf, coordinate, COORD_SIZE - 1);
+
+    if (send_msg(c->sockfd, MSG_EXT_MOVE_SUBMIT, STATUS_OK,
+                 coord_buf, COORD_SIZE) < 0) return r;
+
+    MsgHeader hdr = {0};
+    void *payload = NULL;
+    if (receive_msg(c->sockfd, &hdr, &payload) < 0) return r;
+
+    if (hdr.type != MSG_EXT_MOVE_RESULT || hdr.status != STATUS_OK) {
+        free(payload);
+        return r;
+    }
+
+    r.length = hdr.length;
+    r.data   = payload;
     return r;
 }
 
