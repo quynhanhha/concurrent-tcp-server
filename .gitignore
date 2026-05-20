@@ -1,1 +1,13 @@
-target/
+# Build artifacts
+client
+server
+client.a
+server.a
+*.o
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store

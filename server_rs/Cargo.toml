@@ -1,9 +1,0 @@
-[package]
-name = "comp30023_battleships_server"
-version = "1.0.0"
-edition = "2024"
-build = "build.rs"
-
-[[bin]]
-name = "server"
-path = "src/main.rs"
