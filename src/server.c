@@ -9,11 +9,12 @@
 #include "engine.h"
 
 /*
- * Accept one client and complete the JOIN handshake.
+ * Accept one client and read its MSG_JOIN.
  * Returns the client fd on success, -1 on failure.
  * Sets *out_game_id to the game_id sent by the client.
+ * Does NOT send any response — caller decides acceptance or rejection.
  */
-static int accept_and_join(int listen_fd, uint32_t *out_game_id) {
+static int accept_and_read_join(int listen_fd, uint32_t *out_game_id) {
     struct sockaddr_in ca = {0};
     socklen_t ca_len = sizeof(ca);
 
@@ -24,9 +25,16 @@ static int accept_and_join(int listen_fd, uint32_t *out_game_id) {
     }
     fprintf(stderr, "Client connected from %s\n", inet_ntoa(ca.sin_addr));
 
-    MsgHeader hdr;
+    MsgHeader hdr = {0};
     void *payload = NULL;
-    if (receive_msg(fd, &hdr, &payload) < 0 || hdr.type != MSG_JOIN) {
+    if (receive_msg(fd, &hdr, &payload) < 0) {
+        fprintf(stderr, "receive_msg failed waiting for MSG_JOIN\n");
+        send_msg(fd, MSG_ERROR, STATUS_PROTOCOL_ERROR, NULL, 0);
+        free(payload);
+        close(fd);
+        return -1;
+    }
+    if (hdr.type != MSG_JOIN) {
         fprintf(stderr, "Expected MSG_JOIN, got type %d\n", hdr.type);
         send_msg(fd, MSG_ERROR, STATUS_PROTOCOL_ERROR, NULL, 0);
         free(payload);
@@ -43,11 +51,6 @@ static int accept_and_join(int listen_fd, uint32_t *out_game_id) {
     free(payload);
 
     fprintf(stderr, "JOIN received: game_id=%u\n", game_id);
-
-    if (send_msg(fd, MSG_JOIN_ACCEPTED, STATUS_OK, NULL, 0) < 0) {
-        close(fd);
-        return -1;
-    }
 
     *out_game_id = game_id;
     return fd;
@@ -87,29 +90,41 @@ typedef struct {
 static void run_game(Engine *engine, int listen_fd) {
     GameState g = {0, -1, -1, 0, 0, 0};
 
-    /* Accept Player 1 */
+    /* Accept Player 1: read JOIN only, do not respond yet. */
     uint32_t p1_game_id = 0;
-    g.p1_fd = accept_and_join(listen_fd, &p1_game_id);
+    g.p1_fd = accept_and_read_join(listen_fd, &p1_game_id);
     if (g.p1_fd < 0) return;
     g.game_id = p1_game_id;
-    fprintf(stderr, "Player 1 joined (game_id=%u, fd=%d)\n", g.game_id, g.p1_fd);
 
-    /* Accept Player 2 */
+    /* Accept Player 2: read JOIN only. */
     uint32_t p2_game_id = 0;
-    g.p2_fd = accept_and_join(listen_fd, &p2_game_id);
+    g.p2_fd = accept_and_read_join(listen_fd, &p2_game_id);
     if (g.p2_fd < 0) {
+        send_msg(g.p1_fd, MSG_ERROR, STATUS_PROTOCOL_ERROR, NULL, 0);
         close(g.p1_fd);
         return;
     }
 
+    /* Reject P2 (and clean up P1) if game IDs don't match. */
     if (p2_game_id != g.game_id) {
         fprintf(stderr, "Game ID mismatch: P1=%u P2=%u\n", g.game_id, p2_game_id);
-        send_msg(g.p2_fd, MSG_JOIN_REJECTED, STATUS_GAME_FULL, NULL, 0);
+        send_msg(g.p1_fd, MSG_JOIN_REJECTED, STATUS_PROTOCOL_ERROR, NULL, 0);
+        send_msg(g.p2_fd, MSG_JOIN_REJECTED, STATUS_PROTOCOL_ERROR, NULL, 0);
         close(g.p2_fd);
         close(g.p1_fd);
         return;
     }
-    fprintf(stderr, "Player 2 joined (game_id=%u, fd=%d)\n", p2_game_id, g.p2_fd);
+
+    /* Both players have matching game IDs — accept both now. */
+    if (send_msg(g.p1_fd, MSG_JOIN_ACCEPTED, STATUS_OK, NULL, 0) < 0 ||
+        send_msg(g.p2_fd, MSG_JOIN_ACCEPTED, STATUS_OK, NULL, 0) < 0) {
+        fprintf(stderr, "Failed to send JOIN_ACCEPTED\n");
+        close(g.p2_fd);
+        close(g.p1_fd);
+        return;
+    }
+    fprintf(stderr, "Both players joined (game_id=%u, P1=fd%d P2=fd%d)\n",
+            g.game_id, g.p1_fd, g.p2_fd);
 
     /* Initialise engine game */
     if (!engine_init_game(engine, g.game_id)) {
