@@ -69,74 +69,83 @@ static void deserialize_ships(const uint8_t *buf, Ship ships[4],
     }
 }
 
+/* All mutable state for one game instance. */
+typedef struct {
+    uint32_t game_id;
+    int      p1_fd;
+    int      p2_fd;
+    int      game_inited;  /* 1 after engine_init_game succeeds */
+    uint8_t  current_turn; /* 1 or 2; set to 1 after ship placement */
+    int      game_over;    /* 1 once engine reports a win */
+} GameState;
+
 /*
  * Run one complete game on listen_fd.
  * Accepts two clients, plays through available phases, then returns.
  * The while(1) loop in main() immediately starts the next game.
  */
 static void run_game(Engine *engine, int listen_fd) {
-    int p1_fd = -1, p2_fd = -1;
-    uint32_t game_id = 0;
-    int game_inited = 0;
+    GameState g = {0, -1, -1, 0, 0, 0};
 
     /* Accept Player 1 */
     uint32_t p1_game_id = 0;
-    p1_fd = accept_and_join(listen_fd, &p1_game_id);
-    if (p1_fd < 0) return;
-    game_id = p1_game_id;
-    fprintf(stderr, "Player 1 joined (game_id=%u, fd=%d)\n", game_id, p1_fd);
+    g.p1_fd = accept_and_join(listen_fd, &p1_game_id);
+    if (g.p1_fd < 0) return;
+    g.game_id = p1_game_id;
+    fprintf(stderr, "Player 1 joined (game_id=%u, fd=%d)\n", g.game_id, g.p1_fd);
 
     /* Accept Player 2 */
     uint32_t p2_game_id = 0;
-    p2_fd = accept_and_join(listen_fd, &p2_game_id);
-    if (p2_fd < 0) {
-        close(p1_fd);
+    g.p2_fd = accept_and_join(listen_fd, &p2_game_id);
+    if (g.p2_fd < 0) {
+        close(g.p1_fd);
         return;
     }
 
-    if (p2_game_id != game_id) {
-        fprintf(stderr, "Game ID mismatch: P1=%u P2=%u\n", game_id, p2_game_id);
-        send_msg(p2_fd, MSG_JOIN_REJECTED, STATUS_GAME_FULL, NULL, 0);
-        close(p2_fd);
-        close(p1_fd);
+    if (p2_game_id != g.game_id) {
+        fprintf(stderr, "Game ID mismatch: P1=%u P2=%u\n", g.game_id, p2_game_id);
+        send_msg(g.p2_fd, MSG_JOIN_REJECTED, STATUS_GAME_FULL, NULL, 0);
+        close(g.p2_fd);
+        close(g.p1_fd);
         return;
     }
-    fprintf(stderr, "Player 2 joined (game_id=%u, fd=%d)\n", p2_game_id, p2_fd);
+    fprintf(stderr, "Player 2 joined (game_id=%u, fd=%d)\n", p2_game_id, g.p2_fd);
 
     /* Initialise engine game */
-    if (!engine_init_game(engine, game_id)) {
-        fprintf(stderr, "engine_init_game failed for game_id=%u\n", game_id);
-        send_msg(p1_fd, MSG_ERROR, STATUS_ENGINE_FAIL, NULL, 0);
-        send_msg(p2_fd, MSG_ERROR, STATUS_ENGINE_FAIL, NULL, 0);
+    if (!engine_init_game(engine, g.game_id)) {
+        fprintf(stderr, "engine_init_game failed for game_id=%u\n", g.game_id);
+        send_msg(g.p1_fd, MSG_ERROR, STATUS_ENGINE_FAIL, NULL, 0);
+        send_msg(g.p2_fd, MSG_ERROR, STATUS_ENGINE_FAIL, NULL, 0);
         goto game_end;
     }
-    game_inited = 1;
+    g.game_inited = 1;
 
     /* Notify both players */
-    if (send_msg(p1_fd, MSG_GAME_READY, STATUS_OK, NULL, 0) < 0 ||
-        send_msg(p2_fd, MSG_GAME_READY, STATUS_OK, NULL, 0) < 0) {
+    if (send_msg(g.p1_fd, MSG_GAME_READY, STATUS_OK, NULL, 0) < 0 ||
+        send_msg(g.p2_fd, MSG_GAME_READY, STATUS_OK, NULL, 0) < 0) {
         fprintf(stderr, "Failed to send GAME_READY\n");
         goto game_end;
     }
-    fprintf(stderr, "Game %u ready: P1=fd%d P2=fd%d\n", game_id, p1_fd, p2_fd);
+    fprintf(stderr, "Game %u ready: P1=fd%d P2=fd%d\n",
+            g.game_id, g.p1_fd, g.p2_fd);
 
     /* Ship placement */
     {
         MsgHeader hdr;
         void *payload = NULL;
 
-        Ship      p1_ships[4], p2_ships[4];
-        char      p1_coords[4][COORD_SIZE], p2_coords[4][COORD_SIZE];
+        Ship p1_ships[4], p2_ships[4];
+        char p1_coords[4][COORD_SIZE], p2_coords[4][COORD_SIZE];
 
-        /* Receive P1's ships first, accept-order determines player identity. */
-        if (receive_msg(p1_fd, &hdr, &payload) < 0 ||
+        /* Receive P1's ships first; accept-order determines player identity. */
+        if (receive_msg(g.p1_fd, &hdr, &payload) < 0 ||
             hdr.type != MSG_SHIP_SUBMIT ||
             hdr.length != 4 * SHIP_WIRE_SIZE) {
             fprintf(stderr, "Bad SHIP_SUBMIT from P1 (type=%d len=%u)\n",
                     hdr.type, hdr.length);
             free(payload);
-            send_msg(p1_fd, MSG_ERROR, STATUS_PROTOCOL_ERROR, NULL, 0);
-            send_msg(p2_fd, MSG_ERROR, STATUS_PROTOCOL_ERROR, NULL, 0);
+            send_msg(g.p1_fd, MSG_ERROR, STATUS_PROTOCOL_ERROR, NULL, 0);
+            send_msg(g.p2_fd, MSG_ERROR, STATUS_PROTOCOL_ERROR, NULL, 0);
             goto game_end;
         }
         deserialize_ships(payload, p1_ships, p1_coords);
@@ -144,56 +153,58 @@ static void run_game(Engine *engine, int listen_fd) {
         payload = NULL;
 
         /* Receive P2's ships. */
-        if (receive_msg(p2_fd, &hdr, &payload) < 0 ||
+        if (receive_msg(g.p2_fd, &hdr, &payload) < 0 ||
             hdr.type != MSG_SHIP_SUBMIT ||
             hdr.length != 4 * SHIP_WIRE_SIZE) {
             fprintf(stderr, "Bad SHIP_SUBMIT from P2 (type=%d len=%u)\n",
                     hdr.type, hdr.length);
             free(payload);
-            send_msg(p1_fd, MSG_ERROR, STATUS_PROTOCOL_ERROR, NULL, 0);
-            send_msg(p2_fd, MSG_ERROR, STATUS_PROTOCOL_ERROR, NULL, 0);
+            send_msg(g.p1_fd, MSG_ERROR, STATUS_PROTOCOL_ERROR, NULL, 0);
+            send_msg(g.p2_fd, MSG_ERROR, STATUS_PROTOCOL_ERROR, NULL, 0);
             goto game_end;
         }
         deserialize_ships(payload, p2_ships, p2_coords);
         free(payload);
         payload = NULL;
 
-        /* Place P1's ships first, engine assigns player numbers by call order. */
-        int8_t r1 = engine_place_ships(engine, game_id,
+        /* Place P1's ships first; engine assigns player numbers by call order. */
+        int8_t r1 = engine_place_ships(engine, g.game_id,
                                         (const Ship (*)[4])p1_ships);
-        int8_t r2 = engine_place_ships(engine, game_id,
+        int8_t r2 = engine_place_ships(engine, g.game_id,
                                         (const Ship (*)[4])p2_ships);
 
         if (r1 < 0 || r2 < 0) {
             fprintf(stderr, "engine_place_ships failed (r1=%d r2=%d)\n", r1, r2);
-            send_msg(p1_fd, MSG_ERROR, STATUS_ENGINE_FAIL, NULL, 0);
-            send_msg(p2_fd, MSG_ERROR, STATUS_ENGINE_FAIL, NULL, 0);
+            send_msg(g.p1_fd, MSG_ERROR, STATUS_ENGINE_FAIL, NULL, 0);
+            send_msg(g.p2_fd, MSG_ERROR, STATUS_ENGINE_FAIL, NULL, 0);
             goto game_end;
         }
 
         uint8_t pn1 = (uint8_t)r1, pn2 = (uint8_t)r2;
-        if (send_msg(p1_fd, MSG_SHIP_RESULT, STATUS_OK, &pn1, 1) < 0 ||
-            send_msg(p2_fd, MSG_SHIP_RESULT, STATUS_OK, &pn2, 1) < 0) {
+        if (send_msg(g.p1_fd, MSG_SHIP_RESULT, STATUS_OK, &pn1, 1) < 0 ||
+            send_msg(g.p2_fd, MSG_SHIP_RESULT, STATUS_OK, &pn2, 1) < 0) {
             fprintf(stderr, "Failed to send SHIP_RESULT\n");
             goto game_end;
         }
         fprintf(stderr, "Ships placed: P1 → player %d, P2 → player %d\n",
                 r1, r2);
+
+        g.current_turn = 1;  /* Player 1 moves first. */
     }
 
-    /* TODO: gameplay */
+    /* TODO Phase 6: gameplay loop */
     /* Block until a client sends a move or disconnects. */
     {
         void *payload = NULL;
         MsgHeader hdr;
-        receive_msg(p1_fd, &hdr, &payload);
+        receive_msg(g.p1_fd, &hdr, &payload);
         free(payload);
     }
 
 game_end:
-    if (game_inited) engine_end_game(engine, game_id);
-    if (p1_fd >= 0) close(p1_fd);
-    if (p2_fd >= 0) close(p2_fd);
+    if (g.game_inited) engine_end_game(engine, g.game_id);
+    if (g.p1_fd >= 0) close(g.p1_fd);
+    if (g.p2_fd >= 0) close(g.p2_fd);
 }
 
 int main(int argc, char *argv[]) {
