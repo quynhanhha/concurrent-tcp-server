@@ -12,7 +12,6 @@
  * Accept one client and read its MSG_JOIN.
  * Returns the client fd on success, -1 on failure.
  * Sets *out_game_id to the game_id sent by the client.
- * Does NOT send any response — caller decides acceptance or rejection.
  */
 static int accept_and_read_join(int listen_fd, uint32_t *out_game_id) {
     struct sockaddr_in ca = {0};
@@ -90,13 +89,13 @@ typedef struct {
 static void run_game(Engine *engine, int listen_fd) {
     GameState g = {0, -1, -1, 0, 0, 0};
 
-    /* Accept Player 1: read JOIN only, do not respond yet. */
+    /* Accept Player 1: read JOIN only */
     uint32_t p1_game_id = 0;
     g.p1_fd = accept_and_read_join(listen_fd, &p1_game_id);
     if (g.p1_fd < 0) return;
     g.game_id = p1_game_id;
 
-    /* Accept Player 2: read JOIN only. */
+    /* Accept Player 2: read JOIN only */
     uint32_t p2_game_id = 0;
     g.p2_fd = accept_and_read_join(listen_fd, &p2_game_id);
     if (g.p2_fd < 0) {
@@ -105,7 +104,7 @@ static void run_game(Engine *engine, int listen_fd) {
         return;
     }
 
-    /* Reject P2 (and clean up P1) if game IDs don't match. */
+    /* Reject P2 (and clean up P1) if game IDs don't match */
     if (p2_game_id != g.game_id) {
         fprintf(stderr, "Game ID mismatch: P1=%u P2=%u\n", g.game_id, p2_game_id);
         send_msg(g.p1_fd, MSG_JOIN_REJECTED, STATUS_PROTOCOL_ERROR, NULL, 0);
@@ -115,7 +114,7 @@ static void run_game(Engine *engine, int listen_fd) {
         return;
     }
 
-    /* Both players have matching game IDs — accept both now. */
+    /* Both players have matching game IDs, accept both */
     if (send_msg(g.p1_fd, MSG_JOIN_ACCEPTED, STATUS_OK, NULL, 0) < 0 ||
         send_msg(g.p2_fd, MSG_JOIN_ACCEPTED, STATUS_OK, NULL, 0) < 0) {
         fprintf(stderr, "Failed to send JOIN_ACCEPTED\n");
@@ -146,16 +145,21 @@ static void run_game(Engine *engine, int listen_fd) {
 
     /* Ship placement */
     {
-        MsgHeader hdr;
+        MsgHeader hdr = {0};
         void *payload = NULL;
 
         Ship p1_ships[4], p2_ships[4];
         char p1_coords[4][COORD_SIZE], p2_coords[4][COORD_SIZE];
 
         /* Receive P1's ships first; accept-order determines player identity. */
-        if (receive_msg(g.p1_fd, &hdr, &payload) < 0 ||
-            hdr.type != MSG_SHIP_SUBMIT ||
-            hdr.length != 4 * SHIP_WIRE_SIZE) {
+        if (receive_msg(g.p1_fd, &hdr, &payload) < 0) {
+            fprintf(stderr, "receive_msg failed waiting for P1 SHIP_SUBMIT\n");
+            free(payload);
+            send_msg(g.p1_fd, MSG_ERROR, STATUS_PROTOCOL_ERROR, NULL, 0);
+            send_msg(g.p2_fd, MSG_ERROR, STATUS_PROTOCOL_ERROR, NULL, 0);
+            goto game_end;
+        }
+        if (hdr.type != MSG_SHIP_SUBMIT || hdr.length != 4 * SHIP_WIRE_SIZE) {
             fprintf(stderr, "Bad SHIP_SUBMIT from P1 (type=%d len=%u)\n",
                     hdr.type, hdr.length);
             free(payload);
@@ -168,9 +172,15 @@ static void run_game(Engine *engine, int listen_fd) {
         payload = NULL;
 
         /* Receive P2's ships. */
-        if (receive_msg(g.p2_fd, &hdr, &payload) < 0 ||
-            hdr.type != MSG_SHIP_SUBMIT ||
-            hdr.length != 4 * SHIP_WIRE_SIZE) {
+        hdr = (MsgHeader){0};
+        if (receive_msg(g.p2_fd, &hdr, &payload) < 0) {
+            fprintf(stderr, "receive_msg failed waiting for P2 SHIP_SUBMIT\n");
+            free(payload);
+            send_msg(g.p1_fd, MSG_ERROR, STATUS_PROTOCOL_ERROR, NULL, 0);
+            send_msg(g.p2_fd, MSG_ERROR, STATUS_PROTOCOL_ERROR, NULL, 0);
+            goto game_end;
+        }
+        if (hdr.type != MSG_SHIP_SUBMIT || hdr.length != 4 * SHIP_WIRE_SIZE) {
             fprintf(stderr, "Bad SHIP_SUBMIT from P2 (type=%d len=%u)\n",
                     hdr.type, hdr.length);
             free(payload);
@@ -182,7 +192,7 @@ static void run_game(Engine *engine, int listen_fd) {
         free(payload);
         payload = NULL;
 
-        /* Place P1's ships first; engine assigns player numbers by call order. */
+        /* Place P1's ships first, engine assigns player numbers by call order */
         int8_t r1 = engine_place_ships(engine, g.game_id,
                                         (const Ship (*)[4])p1_ships);
         int8_t r2 = engine_place_ships(engine, g.game_id,
@@ -204,7 +214,7 @@ static void run_game(Engine *engine, int listen_fd) {
         fprintf(stderr, "Ships placed: P1 → player %d, P2 → player %d\n",
                 r1, r2);
 
-        g.current_turn = 1;  /* Player 1 moves first. */
+        g.current_turn = 1;  /* Player 1 moves first */
     }
 
     /* Gameplay loop: alternate turns until one player wins */
@@ -215,7 +225,7 @@ static void run_game(Engine *engine, int listen_fd) {
         MsgHeader hdr = {0};
         void *payload = NULL;
 
-        /* Receive the move; check receive success before reading hdr fields. */
+        /* Receive the move; check receive success before reading hdr fields */
         if (receive_msg(active_fd, &hdr, &payload) < 0) {
             fprintf(stderr, "receive_msg failed for player %d\n", g.current_turn);
             free(payload);
@@ -240,7 +250,7 @@ static void run_game(Engine *engine, int listen_fd) {
         TurnResult result = engine_take_turn(engine, g.game_id,
                                              g.current_turn, coord);
 
-        /* Engine signals an invalid/failed turn — notify both and abort. */
+        /* Engine signals an invalid/failed turn --> notify both and abort */
         if (result == Invalid) {
             fprintf(stderr, "engine_take_turn returned Invalid for player %d "
                     "coord=%s\n", g.current_turn, coord);
@@ -249,7 +259,7 @@ static void run_game(Engine *engine, int listen_fd) {
             goto game_end;
         }
 
-        /* Reply to the active player. */
+        /* Reply to the active player */
         uint8_t result_byte = (uint8_t)result;
         if (send_msg(active_fd, MSG_MOVE_RESULT, STATUS_OK,
                      &result_byte, 1) < 0) {
@@ -257,7 +267,7 @@ static void run_game(Engine *engine, int listen_fd) {
             goto game_end;
         }
 
-        /* Notify the other player of the move and its outcome. */
+        /* Notify the other player of the move and its outcome */
         uint8_t opp_buf[OPPONENT_MOVE_WIRE_SIZE];
         memcpy(opp_buf, coord, COORD_SIZE);
         opp_buf[COORD_SIZE] = result_byte;
