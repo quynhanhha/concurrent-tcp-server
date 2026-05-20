@@ -5,6 +5,9 @@ client.a
 server.a
 *.o
 
+# Cloned test cases 
+tests/cases/
+
 # Editor / OS
 .vscode/
 .idea/
