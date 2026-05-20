@@ -245,8 +245,11 @@ static void run_game(Engine *engine, int listen_fd) {
             send_msg(other_fd,  MSG_ERROR, STATUS_PROTOCOL_ERROR, NULL, 0);
             goto game_end;
         }
-        if (hdr.type != MSG_MOVE_SUBMIT || hdr.length != COORD_SIZE) {
-            fprintf(stderr, "Bad MSG_MOVE_SUBMIT from player %d "
+
+        int extended = (hdr.type == MSG_EXT_MOVE_SUBMIT);
+
+        if ((!extended && hdr.type != MSG_MOVE_SUBMIT) || hdr.length != COORD_SIZE) {
+            fprintf(stderr, "Bad move message from player %d "
                     "(type=%d len=%u)\n", g.current_turn, hdr.type, hdr.length);
             free(payload);
             send_msg(active_fd, MSG_ERROR, STATUS_PROTOCOL_ERROR, NULL, 0);
@@ -259,30 +262,52 @@ static void run_game(Engine *engine, int listen_fd) {
         coord[COORD_SIZE - 1] = '\0';
         free(payload);
 
-        TurnResult result = engine_take_turn(engine, g.game_id,
-                                             g.current_turn, coord);
+        TurnResult result;
 
-        /* Engine signals an invalid/failed turn --> notify both and abort */
-        if (result == Invalid) {
-            fprintf(stderr, "engine_take_turn returned Invalid for player %d "
-                    "coord=%s\n", g.current_turn, coord);
-            send_msg(active_fd, MSG_ERROR, STATUS_ENGINE_FAIL, NULL, 0);
-            send_msg(other_fd,  MSG_ERROR, STATUS_ENGINE_FAIL, NULL, 0);
-            goto game_end;
+        if (extended) {
+            ExtendedTurnResult ext = engine_take_turn_extended(engine, g.game_id,
+                                                               g.current_turn, coord);
+            result = engine_extract_turn_result(ext);
+
+            if (result == Invalid) {
+                fprintf(stderr, "engine_take_turn_extended returned Invalid "
+                        "player=%d coord=%s\n", g.current_turn, coord);
+                engine_free_extended_result(ext);
+                send_msg(active_fd, MSG_ERROR, STATUS_ENGINE_FAIL, NULL, 0);
+                send_msg(other_fd,  MSG_ERROR, STATUS_ENGINE_FAIL, NULL, 0);
+                goto game_end;
+            }
+
+            if (send_msg(active_fd, MSG_EXT_MOVE_RESULT, STATUS_OK,
+                         ext.data, ext.length) < 0) {
+                engine_free_extended_result(ext);
+                send_msg(other_fd, MSG_ERROR, STATUS_DISCONNECTED, NULL, 0);
+                goto game_end;
+            }
+            engine_free_extended_result(ext);
+        } else {
+            result = engine_take_turn(engine, g.game_id, g.current_turn, coord);
+
+            if (result == Invalid) {
+                fprintf(stderr, "engine_take_turn returned Invalid "
+                        "player=%d coord=%s\n", g.current_turn, coord);
+                send_msg(active_fd, MSG_ERROR, STATUS_ENGINE_FAIL, NULL, 0);
+                send_msg(other_fd,  MSG_ERROR, STATUS_ENGINE_FAIL, NULL, 0);
+                goto game_end;
+            }
+
+            uint8_t result_byte = (uint8_t)result;
+            if (send_msg(active_fd, MSG_MOVE_RESULT, STATUS_OK,
+                         &result_byte, 1) < 0) {
+                send_msg(other_fd, MSG_ERROR, STATUS_DISCONNECTED, NULL, 0);
+                goto game_end;
+            }
         }
 
-        /* Reply to the active player */
-        uint8_t result_byte = (uint8_t)result;
-        if (send_msg(active_fd, MSG_MOVE_RESULT, STATUS_OK,
-                     &result_byte, 1) < 0) {
-            send_msg(other_fd, MSG_ERROR, STATUS_DISCONNECTED, NULL, 0);
-            goto game_end;
-        }
-
-        /* Notify the other player of the move and its outcome */
+        /* Notify the passive player of the move and its outcome (both paths) */
         uint8_t opp_buf[OPPONENT_MOVE_WIRE_SIZE];
         memcpy(opp_buf, coord, COORD_SIZE);
-        opp_buf[COORD_SIZE] = result_byte;
+        opp_buf[COORD_SIZE] = (uint8_t)result;
         if (send_msg(other_fd, MSG_OPPONENT_MOVE, STATUS_OK,
                      opp_buf, OPPONENT_MOVE_WIRE_SIZE) < 0) {
             goto game_end;
