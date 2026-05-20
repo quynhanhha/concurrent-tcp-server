@@ -1,4 +1,3 @@
-#include <arpa/inet.h>
 #include <errno.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -42,12 +41,10 @@ ssize_t write_exact(int fd, const void *buf, size_t n) {
 int send_msg(int fd, uint8_t type, uint8_t status,
              const void *payload, uint16_t length) {
     uint8_t hdr[MSG_HEADER_SIZE];
-    uint16_t length_be = htons(length);
-
     hdr[0] = type;
     hdr[1] = status;
-    hdr[2] = (uint8_t)(length_be >> 8);
-    hdr[3] = (uint8_t)(length_be & 0xFF);
+    hdr[2] = (uint8_t)((length >> 8) & 0xFF);  
+    hdr[3] = (uint8_t)(length & 0xFF);          
 
     if (write_exact(fd, hdr, MSG_HEADER_SIZE) < 0) return -1;
     if (length > 0 && payload != NULL) {
