@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/select.h>
 #include <sys/socket.h>
 #include <unistd.h>
 #include "common.h"
@@ -143,60 +144,67 @@ static void run_game(Engine *engine, int listen_fd) {
     fprintf(stderr, "Game %u ready: P1=fd%d P2=fd%d\n",
             g.game_id, g.p1_fd, g.p2_fd);
 
-    /* Ship placement */
+    /* Ship placement: collect from whichever player sends first via select().
+     * Engine is always called P1-then-P2 to preserve accept-order identity,
+     * regardless of which socket delivered its ships first. */
     {
-        MsgHeader hdr = {0};
-        void *payload = NULL;
-
         Ship p1_ships[4], p2_ships[4];
         char p1_coords[4][COORD_SIZE], p2_coords[4][COORD_SIZE];
+        int  p1_done = 0, p2_done = 0;
 
-        /* Receive P1's ships first; accept-order determines player identity. */
-        if (receive_msg(g.p1_fd, &hdr, &payload) < 0) {
-            fprintf(stderr, "receive_msg failed waiting for P1 SHIP_SUBMIT\n");
-            free(payload);
-            send_msg(g.p1_fd, MSG_ERROR, STATUS_PROTOCOL_ERROR, NULL, 0);
-            send_msg(g.p2_fd, MSG_ERROR, STATUS_PROTOCOL_ERROR, NULL, 0);
-            goto game_end;
-        }
-        if (hdr.type != MSG_SHIP_SUBMIT || hdr.length != 4 * SHIP_WIRE_SIZE) {
-            fprintf(stderr, "Bad SHIP_SUBMIT from P1 (type=%d len=%u)\n",
-                    hdr.type, hdr.length);
-            free(payload);
-            send_msg(g.p1_fd, MSG_ERROR, STATUS_PROTOCOL_ERROR, NULL, 0);
-            send_msg(g.p2_fd, MSG_ERROR, STATUS_PROTOCOL_ERROR, NULL, 0);
-            goto game_end;
-        }
-        deserialize_ships(payload, p1_ships, p1_coords);
-        free(payload);
-        payload = NULL;
+        while (!p1_done || !p2_done) {
+            fd_set rfds;
+            FD_ZERO(&rfds);
+            if (!p1_done) FD_SET(g.p1_fd, &rfds);
+            if (!p2_done) FD_SET(g.p2_fd, &rfds);
+            int nfds = (g.p1_fd > g.p2_fd ? g.p1_fd : g.p2_fd) + 1;
 
-        /* Receive P2's ships. */
-        hdr = (MsgHeader){0};
-        if (receive_msg(g.p2_fd, &hdr, &payload) < 0) {
-            fprintf(stderr, "receive_msg failed waiting for P2 SHIP_SUBMIT\n");
-            free(payload);
-            send_msg(g.p1_fd, MSG_ERROR, STATUS_PROTOCOL_ERROR, NULL, 0);
-            send_msg(g.p2_fd, MSG_ERROR, STATUS_PROTOCOL_ERROR, NULL, 0);
-            goto game_end;
-        }
-        if (hdr.type != MSG_SHIP_SUBMIT || hdr.length != 4 * SHIP_WIRE_SIZE) {
-            fprintf(stderr, "Bad SHIP_SUBMIT from P2 (type=%d len=%u)\n",
-                    hdr.type, hdr.length);
-            free(payload);
-            send_msg(g.p1_fd, MSG_ERROR, STATUS_PROTOCOL_ERROR, NULL, 0);
-            send_msg(g.p2_fd, MSG_ERROR, STATUS_PROTOCOL_ERROR, NULL, 0);
-            goto game_end;
-        }
-        deserialize_ships(payload, p2_ships, p2_coords);
-        free(payload);
-        payload = NULL;
+            if (select(nfds, &rfds, NULL, NULL, NULL) < 0) {
+                perror("select");
+                send_msg(g.p1_fd, MSG_ERROR, STATUS_PROTOCOL_ERROR, NULL, 0);
+                send_msg(g.p2_fd, MSG_ERROR, STATUS_PROTOCOL_ERROR, NULL, 0);
+                goto game_end;
+            }
 
-        /* Place P1's ships first, engine assigns player numbers by call order */
-        int8_t r1 = engine_place_ships(engine, g.game_id,
-                                        (const Ship (*)[4])p1_ships);
-        int8_t r2 = engine_place_ships(engine, g.game_id,
-                                        (const Ship (*)[4])p2_ships);
+            /* Handle whichever fd(s) are ready. */
+            int fds[2]   = {g.p1_fd,  g.p2_fd};
+            int *done[2] = {&p1_done, &p2_done};
+            Ship  (*ships[2])[4]    = {&p1_ships,  &p2_ships};
+            char  (*coords[2])[4][COORD_SIZE] = {&p1_coords, &p2_coords};
+            const char *names[2] = {"P1", "P2"};
+
+            for (int i = 0; i < 2; i++) {
+                if (!FD_ISSET(fds[i], &rfds)) continue;
+
+                MsgHeader hdr = {0};
+                void *payload = NULL;
+
+                if (receive_msg(fds[i], &hdr, &payload) < 0) {
+                    fprintf(stderr, "receive_msg failed for %s SHIP_SUBMIT\n",
+                            names[i]);
+                    free(payload);
+                    send_msg(g.p1_fd, MSG_ERROR, STATUS_PROTOCOL_ERROR, NULL, 0);
+                    send_msg(g.p2_fd, MSG_ERROR, STATUS_PROTOCOL_ERROR, NULL, 0);
+                    goto game_end;
+                }
+                if (hdr.type != MSG_SHIP_SUBMIT ||
+                    hdr.length != 4 * SHIP_WIRE_SIZE) {
+                    fprintf(stderr, "Bad SHIP_SUBMIT from %s "
+                            "(type=%d len=%u)\n", names[i], hdr.type, hdr.length);
+                    free(payload);
+                    send_msg(g.p1_fd, MSG_ERROR, STATUS_PROTOCOL_ERROR, NULL, 0);
+                    send_msg(g.p2_fd, MSG_ERROR, STATUS_PROTOCOL_ERROR, NULL, 0);
+                    goto game_end;
+                }
+                deserialize_ships(payload, *ships[i], *coords[i]);
+                free(payload);
+                *done[i] = 1;
+            }
+        }
+
+        /* Place P1's ships first; engine assigns player numbers by call order */
+        int8_t r1 = engine_place_ships(engine, g.game_id,(const Ship (*)[4])p1_ships);
+        int8_t r2 = engine_place_ships(engine, g.game_id,(const Ship (*)[4])p2_ships);
 
         if (r1 < 0 || r2 < 0) {
             fprintf(stderr, "engine_place_ships failed (r1=%d r2=%d)\n", r1, r2);
