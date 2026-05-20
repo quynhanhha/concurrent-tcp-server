@@ -98,7 +98,15 @@ void client_close(ClientImplementation *client) {
 
 bool client_wait_for_opponent(ClientImplementation *client) {
     if (!client) return false;
-    return false;
+    Client *c = (Client *)client;
+    if (c->sockfd < 0) return false;
+
+    MsgHeader hdr;
+    void *payload = NULL;
+    if (receive_msg(c->sockfd, &hdr, &payload) < 0) return false;
+    free(payload);
+
+    return hdr.type == MSG_GAME_READY;
 }
 
 int8_t client_send_ships(ClientImplementation *client, const struct Ship (*ships)[4]) {
