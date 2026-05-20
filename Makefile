@@ -19,7 +19,7 @@ client.a: src/client.o src/common.o
 	rm -f $@
 	ar rcs $@ $^
 
-server.a: src/server.o src/common.o
+server.a: src/server.o src/server_game.o src/common.o
 	rm -f $@
 	ar rcs $@ $^
 
