@@ -109,10 +109,38 @@ bool client_wait_for_opponent(ClientImplementation *client) {
     return hdr.type == MSG_GAME_READY;
 }
 
-int8_t client_send_ships(ClientImplementation *client, const struct Ship (*ships)[4]) {
+int8_t client_send_ships(ClientImplementation *client,
+                         const struct Ship (*ships)[4]) {
     if (!client) return -1;
-    (void)ships;
-    return -1;
+    Client *c = (Client *)client;
+    if (c->sockfd < 0) return -1;
+
+    /* Serialize 4 ships into a flat buffer: COORD(4B) + length(1B) + dir(1B). */
+    uint8_t buf[4 * SHIP_WIRE_SIZE];
+    for (int i = 0; i < 4; i++) {
+        uint8_t *p = buf + i * SHIP_WIRE_SIZE;
+        memset(p, 0, COORD_SIZE);
+        strncpy((char *)p, (*ships)[i].coordinate, COORD_SIZE - 1);
+        p[COORD_SIZE]     = (*ships)[i].length;
+        p[COORD_SIZE + 1] = (uint8_t)(*ships)[i].direction;
+    }
+
+    if (send_msg(c->sockfd, MSG_SHIP_SUBMIT, STATUS_OK,
+                 buf, (uint16_t)sizeof(buf)) < 0) return -1;
+
+    MsgHeader hdr;
+    void *payload = NULL;
+    if (receive_msg(c->sockfd, &hdr, &payload) < 0) return -1;
+
+    if (hdr.type != MSG_SHIP_RESULT || hdr.length != 1 || payload == NULL) {
+        free(payload);
+        return -1;
+    }
+
+    int8_t player_num = (int8_t)((uint8_t *)payload)[0];
+    free(payload);
+    c->player_num = player_num;
+    return player_num;
 }
 
 enum TurnResult client_send_move(ClientImplementation *client, const char *coordinate) {
