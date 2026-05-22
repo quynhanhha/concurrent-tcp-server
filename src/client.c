@@ -1,5 +1,6 @@
 #include <arpa/inet.h>
 #include <netdb.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -18,6 +19,7 @@ typedef struct Client {
 /* ── Lifecycle ──────────────────────────────────────────────────────────── */
 
 ClientImplementation *client_init(void) {
+    signal(SIGPIPE, SIG_IGN);
     Client *c = malloc(sizeof(Client));
     if (!c) return NULL;
     c->sockfd     = -1;

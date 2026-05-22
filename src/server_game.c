@@ -74,20 +74,47 @@ static void deserialize_ships(const uint8_t *buf, Ship ships[4],
     }
 }
 
+/*
+ * Accept one extra connection on listen_fd and reject it (game full).
+ * Consumes the client's JOIN message before replying so no unread data
+ * causes a TCP RST that would mask the rejection code.
+ */
+static void reject_extra_connection(int listen_fd) {
+    struct sockaddr_in ca = {0};
+    socklen_t ca_len = sizeof(ca);
+    int fd = accept(listen_fd, (struct sockaddr *)&ca, &ca_len);
+    if (fd < 0) return;
+    MsgHeader hdr = {0};
+    void *payload = NULL;
+    receive_msg(fd, &hdr, &payload);
+    free(payload);
+    send_msg(fd, MSG_JOIN_REJECTED, STATUS_GAME_FULL, NULL, 0);
+    close(fd);
+}
+
 void run_game(Engine *engine, int listen_fd) {
     GameState g = {0, -1, -1, 0, 0, 0};
 
-    /* Accept Player 1: any game_id is valid as the session's ID.
-     * Send JOIN_ACCEPTED immediately so client_connect can return
-     * without waiting for a second player to connect. */
+    /* Accept Player 1: any game_id is valid as the session's ID. */
     uint32_t p1_game_id = 0;
     g.p1_fd = accept_and_read_join(listen_fd, &p1_game_id);
     if (g.p1_fd < 0) return;
     g.game_id = p1_game_id;
 
-    if (send_msg(g.p1_fd, MSG_JOIN_ACCEPTED, STATUS_OK, NULL, 0) < 0) {
+    /* Initialise the engine game right after P1 joins, before accepting P2.
+     * This allows the server to reject P1 immediately when engine init fails
+     * (e.g. ENGINE_MODE=fail_init) instead of hanging waiting for P2. */
+    if (!engine_init_game(engine, g.game_id)) {
+        fprintf(stderr, "engine_init_game failed for game_id=%u\n", g.game_id);
+        send_msg(g.p1_fd, MSG_ERROR, STATUS_ENGINE_FAIL, NULL, 0);
         close(g.p1_fd);
-        return;
+        return;  /* game_inited is still 0 — no engine cleanup required */
+    }
+    g.game_inited = 1;
+
+    /* Send JOIN_ACCEPTED to P1 so client_connect can return before P2 arrives. */
+    if (send_msg(g.p1_fd, MSG_JOIN_ACCEPTED, STATUS_OK, NULL, 0) < 0) {
+        goto game_end;
     }
     fprintf(stderr, "P1 joined (game_id=%u, fd=%d)\n", g.game_id, g.p1_fd);
 
@@ -96,8 +123,7 @@ void run_game(Engine *engine, int listen_fd) {
     g.p2_fd = accept_and_read_join(listen_fd, &p2_game_id);
     if (g.p2_fd < 0) {
         send_msg(g.p1_fd, MSG_ERROR, STATUS_PROTOCOL_ERROR, NULL, 0);
-        close(g.p1_fd);
-        return;
+        goto game_end;
     }
 
     if (p2_game_id != g.game_id) {
@@ -105,28 +131,17 @@ void run_game(Engine *engine, int listen_fd) {
         send_msg(g.p2_fd, MSG_JOIN_REJECTED, STATUS_PROTOCOL_ERROR, NULL, 0);
         send_msg(g.p1_fd, MSG_ERROR, STATUS_PROTOCOL_ERROR, NULL, 0);
         close(g.p2_fd);
-        close(g.p1_fd);
-        return;
+        g.p2_fd = -1;
+        goto game_end;
     }
 
     if (send_msg(g.p2_fd, MSG_JOIN_ACCEPTED, STATUS_OK, NULL, 0) < 0) {
         send_msg(g.p1_fd, MSG_ERROR, STATUS_PROTOCOL_ERROR, NULL, 0);
-        close(g.p2_fd);
-        close(g.p1_fd);
-        return;
+        goto game_end;
     }
     fprintf(stderr, "P2 joined (game_id=%u, fd=%d)\n", p2_game_id, g.p2_fd);
 
-    /* Initialise engine game */
-    if (!engine_init_game(engine, g.game_id)) {
-        fprintf(stderr, "engine_init_game failed for game_id=%u\n", g.game_id);
-        send_msg(g.p1_fd, MSG_ERROR, STATUS_ENGINE_FAIL, NULL, 0);
-        send_msg(g.p2_fd, MSG_ERROR, STATUS_ENGINE_FAIL, NULL, 0);
-        goto game_end;
-    }
-    g.game_inited = 1;
-
-    /* Notify both players */
+    /* Notify both players — engine was already initialised after P1 joined. */
     if (send_msg(g.p1_fd, MSG_GAME_READY, STATUS_OK, NULL, 0) < 0 ||
         send_msg(g.p2_fd, MSG_GAME_READY, STATUS_OK, NULL, 0) < 0) {
         fprintf(stderr, "Failed to send GAME_READY\n");
@@ -148,7 +163,11 @@ void run_game(Engine *engine, int listen_fd) {
             FD_ZERO(&rfds);
             if (!p1_done) FD_SET(g.p1_fd, &rfds);
             if (!p2_done) FD_SET(g.p2_fd, &rfds);
-            int nfds = (g.p1_fd > g.p2_fd ? g.p1_fd : g.p2_fd) + 1;
+            FD_SET(listen_fd, &rfds);
+            int nfds = g.p1_fd;
+            if (g.p2_fd   > nfds) nfds = g.p2_fd;
+            if (listen_fd > nfds) nfds = listen_fd;
+            nfds++;
 
             if (select(nfds, &rfds, NULL, NULL, NULL) < 0) {
                 perror("select");
@@ -156,6 +175,9 @@ void run_game(Engine *engine, int listen_fd) {
                 send_msg(g.p2_fd, MSG_ERROR, STATUS_PROTOCOL_ERROR, NULL, 0);
                 goto game_end;
             }
+
+            if (FD_ISSET(listen_fd, &rfds))
+                reject_extra_connection(listen_fd);
 
             /* Handle whichever fd(s) are ready. */
             int fds[2]   = {g.p1_fd,  g.p2_fd};
@@ -222,6 +244,24 @@ void run_game(Engine *engine, int listen_fd) {
     while (!g.game_over) {
         int active_fd = (g.current_turn == 1) ? g.p1_fd : g.p2_fd;
         int other_fd  = (g.current_turn == 1) ? g.p2_fd : g.p1_fd;
+
+        {
+            fd_set rfds;
+            FD_ZERO(&rfds);
+            FD_SET(active_fd, &rfds);
+            FD_SET(listen_fd, &rfds);
+            int nfds = (active_fd > listen_fd ? active_fd : listen_fd) + 1;
+            if (select(nfds, &rfds, NULL, NULL, NULL) < 0) {
+                perror("select");
+                send_msg(active_fd, MSG_ERROR, STATUS_PROTOCOL_ERROR, NULL, 0);
+                send_msg(other_fd,  MSG_ERROR, STATUS_PROTOCOL_ERROR, NULL, 0);
+                goto game_end;
+            }
+            if (FD_ISSET(listen_fd, &rfds))
+                reject_extra_connection(listen_fd);
+            if (!FD_ISSET(active_fd, &rfds))
+                continue;
+        }
 
         MsgHeader hdr = {0};
         void *payload = NULL;
@@ -293,7 +333,7 @@ void run_game(Engine *engine, int listen_fd) {
             }
         }
 
-        /* Notify the passive player of the move and its outcome (both paths) */
+        /* Notify the passive player of the move and its outcome */
         uint8_t opp_buf[OPPONENT_MOVE_WIRE_SIZE];
         memcpy(opp_buf, coord, COORD_SIZE);
         opp_buf[COORD_SIZE] = (uint8_t)result;
