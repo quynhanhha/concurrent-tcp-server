@@ -1,4 +1,5 @@
 #include <netinet/in.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/socket.h>
@@ -18,6 +19,8 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "Invalid port: %s\n", argv[1]);
         exit(1);
     }
+
+    signal(SIGPIPE, SIG_IGN);
 
     Engine *engine = engine_init();
     if (!engine) {
