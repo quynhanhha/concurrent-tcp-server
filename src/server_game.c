@@ -140,17 +140,8 @@ static void run_game_for_pair(Engine *engine,
     fprintf(stderr, "Game %u starting: P1=fd%d P2=fd%d\n",
             game_id, p1_fd, p2_fd);
 
-    /* Send JOIN_ACCEPTED to both. P1 has been blocking in client_connect
-     * since its join handler ran; P2 is waiting too. */
-    if (send_msg(g.p1_fd, MSG_JOIN_ACCEPTED, STATUS_OK, NULL, 0) < 0) {
-        send_msg(g.p2_fd, MSG_ERROR, STATUS_DISCONNECTED, NULL, 0);
-        goto game_end;
-    }
-    if (send_msg(g.p2_fd, MSG_JOIN_ACCEPTED, STATUS_OK, NULL, 0) < 0) {
-        goto game_end;
-    }
-
-    /* Notify both players that the game is ready to start. */
+    /* Both players already received MSG_JOIN_ACCEPTED from their join handlers.
+     * Notify them the game is ready to start. */
     if (send_msg(g.p1_fd, MSG_GAME_READY, STATUS_OK, NULL, 0) < 0 ||
         send_msg(g.p2_fd, MSG_GAME_READY, STATUS_OK, NULL, 0) < 0) {
         fprintf(stderr, "Failed to send GAME_READY for game %u\n", game_id);
@@ -458,7 +449,23 @@ void *join_handler_fn(void *arg) {
 
         fprintf(stderr, "Matched game_id=%u P1=fd%d P2=fd%d\n",
                 game_id, p1_fd, fd);
-        /* Game thread sends JOIN_ACCEPTED + GAME_READY to both players. */
+
+        /* Acknowledge P2 immediately so its client_connect() can return. */
+        if (send_msg(fd, MSG_JOIN_ACCEPTED, STATUS_OK, NULL, 0) < 0) {
+            /* P2 disconnected right after matching. */
+            pthread_mutex_lock(&registry_mutex);
+            remove_active(game_id);
+            pthread_mutex_unlock(&registry_mutex);
+            pthread_mutex_lock(&engine_mutex);
+            engine_end_game(engine, game_id);
+            pthread_mutex_unlock(&engine_mutex);
+            send_msg(p1_fd, MSG_ERROR, STATUS_DISCONNECTED, NULL, 0);
+            close(p1_fd);
+            close(fd);
+            return NULL;
+        }
+
+        /* Game thread sends GAME_READY to both players. */
         spawn_game_thread(engine, p1_fd, fd, game_id);
         return NULL;
     }
@@ -490,8 +497,21 @@ void *join_handler_fn(void *arg) {
         return NULL;
     }
 
+    /* Acknowledge P1 immediately so client_connect() can return.
+     * P1 then calls client_wait_for_opponent() and blocks for MSG_GAME_READY,
+     * which the game thread sends once P2 matches. */
     fprintf(stderr, "P1 pending: game_id=%u fd=%d slot=%d\n", game_id, fd, slot);
-    /* P1 keeps its fd open, blocking in client_connect until the game thread
-     * sends MSG_JOIN_ACCEPTED (once P2 matches and the game thread starts). */
+    if (send_msg(fd, MSG_JOIN_ACCEPTED, STATUS_OK, NULL, 0) < 0) {
+        /* P1 disconnected before we could notify it; pull it back out. */
+        pthread_mutex_lock(&registry_mutex);
+        int ridx = find_pending(game_id);
+        if (ridx >= 0 && pending_games[ridx].p1_fd == fd)
+            remove_pending(ridx);
+        pthread_mutex_unlock(&registry_mutex);
+        pthread_mutex_lock(&engine_mutex);
+        engine_end_game(engine, game_id);
+        pthread_mutex_unlock(&engine_mutex);
+        close(fd);
+    }
     return NULL;
 }
