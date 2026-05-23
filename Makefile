@@ -3,7 +3,7 @@ LIBRUNNER=project2-bin/librunner.a
 
 CC=cc
 CFLAGS=-Wall -Isrc
-LDFLAGS=
+LDFLAGS=-lpthread
 
 all: client.a server.a
 

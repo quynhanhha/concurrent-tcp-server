@@ -1,5 +1,6 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -9,6 +10,16 @@
 #include "common.h"
 #include "engine.h"
 #include "server_game.h"
+
+/* ── Thread types ───────────────────────────────────────────────────────── */
+
+typedef struct {
+    Engine   *engine;
+    int       p1_fd;
+    int       p2_fd;
+    uint32_t  game_id;
+    int       listen_fd;
+} GameThreadArgs;
 
 /*
  * Accept one client and read its MSG_JOIN.
@@ -323,6 +334,13 @@ game_end:
     if (g.p2_fd >= 0) close(g.p2_fd);
 }
 
+static void *game_thread_fn(void *arg) {
+    GameThreadArgs *a = (GameThreadArgs *)arg;
+    run_game_for_pair(a->engine, a->p1_fd, a->p2_fd, a->game_id, a->listen_fd);
+    free(a);
+    return NULL;
+}
+
 void run_game(Engine *engine, int listen_fd) {
     int p1_fd = -1, p2_fd = -1;
     uint32_t game_id = 0;
@@ -371,8 +389,28 @@ void run_game(Engine *engine, int listen_fd) {
     }
     fprintf(stderr, "P2 joined (game_id=%u, fd=%d)\n", p2_game_id, p2_fd);
 
-    /* Ownership of p1_fd and p2_fd transfers to run_game_for_pair. */
-    run_game_for_pair(engine, p1_fd, p2_fd, game_id, listen_fd);
+    /* Ownership of p1_fd and p2_fd transfers to the game thread. */
+    GameThreadArgs *args = malloc(sizeof(GameThreadArgs));
+    if (!args) {
+        send_msg(p1_fd, MSG_ERROR, STATUS_ENGINE_FAIL, NULL, 0);
+        send_msg(p2_fd, MSG_ERROR, STATUS_ENGINE_FAIL, NULL, 0);
+        goto cleanup;
+    }
+    args->engine    = engine;
+    args->p1_fd     = p1_fd;
+    args->p2_fd     = p2_fd;
+    args->game_id   = game_id;
+    args->listen_fd = listen_fd;
+
+    pthread_t tid;
+    if (pthread_create(&tid, NULL, game_thread_fn, args) != 0) {
+        perror("pthread_create");
+        free(args);
+        send_msg(p1_fd, MSG_ERROR, STATUS_ENGINE_FAIL, NULL, 0);
+        send_msg(p2_fd, MSG_ERROR, STATUS_ENGINE_FAIL, NULL, 0);
+        goto cleanup;
+    }
+    pthread_join(tid, NULL);  
     return;
 
 cleanup:
