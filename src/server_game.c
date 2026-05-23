@@ -13,8 +13,8 @@
 
 /* ── Engine mutex ───────────────────────────────────────────────────────── */
 
-/* One global mutex serialises all engine calls.
- * Never held while blocking on socket I/O. */
+/* One global mutex serialises all engine calls
+ * Never held while blocking on socket I/O */
 static pthread_mutex_t engine_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 /* ── Registries ─────────────────────────────────────────────────────────── */
@@ -22,20 +22,20 @@ static pthread_mutex_t engine_mutex = PTHREAD_MUTEX_INITIALIZER;
 #define MAX_PENDING 64
 #define MAX_ACTIVE  64
 
-/* Waiting for a second player.  engine_init_game has already succeeded. */
+/* Waiting for a second player. engine_init_game has already succeeded */
 typedef struct {
     int      active;
     uint32_t game_id;
     int      p1_fd;
 } PendingGame;
 
-/* Game thread is running. */
+/* Game thread is running */
 typedef struct {
     int      active;
     uint32_t game_id;
 } ActiveGame;
 
-static PendingGame     pending_games[MAX_PENDING];   /* zero-init → all empty */
+static PendingGame     pending_games[MAX_PENDING];   
 static ActiveGame      active_games[MAX_ACTIVE];
 static pthread_mutex_t registry_mutex = PTHREAD_MUTEX_INITIALIZER;
 
@@ -127,36 +127,24 @@ static void deserialize_ships(const uint8_t *buf, Ship ships[4],
 /* ── Game pair runner ───────────────────────────────────────────────────── */
 
 /*
- * Run a complete game for two already-matched players.
- * Precondition: engine_init_game(engine, game_id) has already succeeded,
- * and game_id is registered in active_games.
- * Takes ownership of p1_fd and p2_fd: both are closed before returning.
- * Removes game_id from active_games and calls engine_end_game before returning.
+ * Run a complete game for two already-matched players
+ * Precondition: engine_init_game(engine, game_id) has already succeeded
+ * and game_id is registered in active_games
+ * Takes ownership of p1_fd and p2_fd: both are closed before returning
+ * Removes game_id from active_games and calls engine_end_game before returning
  */
-static void run_game_for_pair(Engine *engine,
-                              int p1_fd, int p2_fd, uint32_t game_id) {
+static void run_game_for_pair(Engine *engine,int p1_fd, int p2_fd, uint32_t game_id) {
     GameState g = {game_id, p1_fd, p2_fd, 0, 0};
 
-    fprintf(stderr, "Game %u starting: P1=fd%d P2=fd%d\n",
-            game_id, p1_fd, p2_fd);
-
     /* Both players already received MSG_JOIN_ACCEPTED from their join handlers.
-     * Notify them the game is ready to start.
-     * Check each send separately: if P1 is stale we explicitly notify P2
-     * with MSG_ERROR before cleaning up, so it gets a clean failure rather
-     * than a silent EOF. */
+     * Check each send separately: if P1 is stale, explicitly notify P2. */
     if (send_msg(g.p1_fd, MSG_GAME_READY, STATUS_OK, NULL, 0) < 0) {
-        fprintf(stderr, "Game %u: P1 (fd%d) stale — notifying P2 and cleaning up\n",
-                game_id, p1_fd);
         send_msg(g.p2_fd, MSG_ERROR, STATUS_DISCONNECTED, NULL, 0);
         goto game_end;
     }
     if (send_msg(g.p2_fd, MSG_GAME_READY, STATUS_OK, NULL, 0) < 0) {
-        fprintf(stderr, "Game %u: P2 (fd%d) stale — cleaning up\n",
-                game_id, p2_fd);
         goto game_end;
     }
-    fprintf(stderr, "Game %u ready\n", game_id);
 
     /* Ship placement: collect from whichever player sends first.
      * Engine is always called P1-then-P2 to preserve accept-order identity. */
@@ -183,7 +171,6 @@ static void run_game_for_pair(Engine *engine,
             int *done[2] = {&p1_done, &p2_done};
             Ship  (*ships[2])[4]              = {&p1_ships,  &p2_ships};
             char  (*coords[2])[4][COORD_SIZE] = {&p1_coords, &p2_coords};
-            const char *names[2] = {"P1", "P2"};
 
             for (int i = 0; i < 2; i++) {
                 if (!FD_ISSET(fds[i], &rfds)) continue;
@@ -192,8 +179,6 @@ static void run_game_for_pair(Engine *engine,
                 void *payload = NULL;
 
                 if (receive_msg(fds[i], &hdr, &payload) < 0) {
-                    fprintf(stderr, "receive_msg failed for %s SHIP_SUBMIT\n",
-                            names[i]);
                     free(payload);
                     send_msg(g.p1_fd, MSG_ERROR, STATUS_PROTOCOL_ERROR, NULL, 0);
                     send_msg(g.p2_fd, MSG_ERROR, STATUS_PROTOCOL_ERROR, NULL, 0);
@@ -201,7 +186,6 @@ static void run_game_for_pair(Engine *engine,
                 }
                 if (hdr.type != MSG_SHIP_SUBMIT ||
                     hdr.length != 4 * SHIP_WIRE_SIZE) {
-                    fprintf(stderr, "Bad SHIP_SUBMIT from %s\n", names[i]);
                     free(payload);
                     send_msg(g.p1_fd, MSG_ERROR, STATUS_PROTOCOL_ERROR, NULL, 0);
                     send_msg(g.p2_fd, MSG_ERROR, STATUS_PROTOCOL_ERROR, NULL, 0);
@@ -214,14 +198,11 @@ static void run_game_for_pair(Engine *engine,
         }
 
         pthread_mutex_lock(&engine_mutex);
-        int8_t r1 = engine_place_ships(engine, g.game_id,
-                                        (const Ship (*)[4])p1_ships);
-        int8_t r2 = engine_place_ships(engine, g.game_id,
-                                        (const Ship (*)[4])p2_ships);
+        int8_t r1 = engine_place_ships(engine, g.game_id, (const Ship (*)[4])p1_ships);
+        int8_t r2 = engine_place_ships(engine, g.game_id, (const Ship (*)[4])p2_ships);
         pthread_mutex_unlock(&engine_mutex);
 
         if (r1 < 0 || r2 < 0) {
-            fprintf(stderr, "engine_place_ships failed (r1=%d r2=%d)\n", r1, r2);
             send_msg(g.p1_fd, MSG_ERROR, STATUS_ENGINE_FAIL, NULL, 0);
             send_msg(g.p2_fd, MSG_ERROR, STATUS_ENGINE_FAIL, NULL, 0);
             goto game_end;
@@ -232,9 +213,6 @@ static void run_game_for_pair(Engine *engine,
             send_msg(g.p2_fd, MSG_SHIP_RESULT, STATUS_OK, &pn2, 1) < 0) {
             goto game_end;
         }
-        fprintf(stderr, "Game %u ships placed: P1→player%d P2→player%d\n",
-                game_id, r1, r2);
-
         g.current_turn = 1;
     }
 
@@ -247,8 +225,6 @@ static void run_game_for_pair(Engine *engine,
         void *payload = NULL;
 
         if (receive_msg(active_fd, &hdr, &payload) < 0) {
-            fprintf(stderr, "receive_msg failed for player %d game %u\n",
-                    g.current_turn, game_id);
             free(payload);
             send_msg(active_fd, MSG_ERROR, STATUS_PROTOCOL_ERROR, NULL, 0);
             send_msg(other_fd,  MSG_ERROR, STATUS_PROTOCOL_ERROR, NULL, 0);
@@ -258,8 +234,6 @@ static void run_game_for_pair(Engine *engine,
         int extended = (hdr.type == MSG_EXT_MOVE_SUBMIT);
 
         if ((!extended && hdr.type != MSG_MOVE_SUBMIT) || hdr.length != COORD_SIZE) {
-            fprintf(stderr, "Bad move from player %d game %u\n",
-                    g.current_turn, game_id);
             free(payload);
             send_msg(active_fd, MSG_ERROR, STATUS_PROTOCOL_ERROR, NULL, 0);
             send_msg(other_fd,  MSG_ERROR, STATUS_PROTOCOL_ERROR, NULL, 0);
@@ -320,9 +294,6 @@ static void run_game_for_pair(Engine *engine,
                      opp_buf, OPPONENT_MOVE_WIRE_SIZE) < 0) {
             goto game_end;
         }
-
-        fprintf(stderr, "Game %u: player %d coord=%s result=%d\n",
-                game_id, g.current_turn, coord, (int)result);
 
         if (result == Win) {
             g.game_over = 1;
@@ -422,14 +393,13 @@ void *join_handler_fn(void *arg) {
         game_id = ntohl(raw);
     }
     free(payload);
-    fprintf(stderr, "JOIN: game_id=%u fd=%d\n", game_id, fd);
 
     /* 2. Registry decision (held for the entire check + init/add sequence
      *    to prevent TOCTOU between find and add). */
     pthread_mutex_lock(&registry_mutex);
 
     if (find_active(game_id) >= 0) {
-        /* Game already running — reject. */
+        /* Game already running --> reject */
         pthread_mutex_unlock(&registry_mutex);
         send_msg(fd, MSG_JOIN_REJECTED, STATUS_GAME_FULL, NULL, 0);
         close(fd);
@@ -438,14 +408,14 @@ void *join_handler_fn(void *arg) {
 
     int pidx = find_pending(game_id);
     if (pidx >= 0) {
-        /* Match: this client is P2. */
+        /* Match: this client is P2 */
         int p1_fd = pending_games[pidx].p1_fd;
         remove_pending(pidx);
         int aidx = add_active(game_id);
         pthread_mutex_unlock(&registry_mutex);
 
         if (aidx < 0) {
-            /* Active registry full. */
+            /* Active registry full */
             pthread_mutex_lock(&engine_mutex);
             engine_end_game(engine, game_id);
             pthread_mutex_unlock(&engine_mutex);
@@ -456,10 +426,7 @@ void *join_handler_fn(void *arg) {
             return NULL;
         }
 
-        fprintf(stderr, "Matched game_id=%u P1=fd%d P2=fd%d\n",
-                game_id, p1_fd, fd);
-
-        /* Acknowledge P2 immediately so its client_connect() can return. */
+        /* Acknowledge P2 immediately so its client_connect() can return */
         if (send_msg(fd, MSG_JOIN_ACCEPTED, STATUS_OK, NULL, 0) < 0) {
             /* P2 disconnected right after matching. */
             pthread_mutex_lock(&registry_mutex);
@@ -474,7 +441,7 @@ void *join_handler_fn(void *arg) {
             return NULL;
         }
 
-        /* Game thread sends GAME_READY to both players. */
+        /* Game thread sends GAME_READY to both players */
         spawn_game_thread(engine, p1_fd, fd, game_id);
         return NULL;
     }
@@ -497,7 +464,7 @@ void *join_handler_fn(void *arg) {
     pthread_mutex_unlock(&registry_mutex);
 
     if (slot < 0) {
-        /* Pending registry full. */
+        /* Pending registry full */
         pthread_mutex_lock(&engine_mutex);
         engine_end_game(engine, game_id);
         pthread_mutex_unlock(&engine_mutex);
@@ -509,7 +476,6 @@ void *join_handler_fn(void *arg) {
     /* Acknowledge P1 immediately so client_connect() can return.
      * P1 then calls client_wait_for_opponent() and blocks for MSG_GAME_READY,
      * which the game thread sends once P2 matches. */
-    fprintf(stderr, "P1 pending: game_id=%u fd=%d slot=%d\n", game_id, fd, slot);
     if (send_msg(fd, MSG_JOIN_ACCEPTED, STATUS_OK, NULL, 0) < 0) {
         /* P1 disconnected before we could notify it; pull it back out. */
         pthread_mutex_lock(&registry_mutex);

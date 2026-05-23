@@ -7,13 +7,13 @@
 /* ── Wire constants ─────────────────────────────────────────────────────── */
 
 /* Maximum coordinate string size including null terminator.
- * Longest valid coordinate is "J10" (3 chars) → 4 bytes with '\0'. */
+ * Longest valid coordinate is "J10" (3 chars) → 4 bytes with '\0' */
 #define COORD_SIZE 4
 
-/* Bytes sent on the wire per ship: COORD_SIZE + 1 (length) + 1 (direction). */
+/* Bytes sent on the wire per ship: COORD_SIZE + 1 (length) + 1 (direction) */
 #define SHIP_WIRE_SIZE (COORD_SIZE + 2)
 
-/* Bytes in a MSG_OPPONENT_MOVE payload: coordinate + 1-byte TurnResult. */
+/* Bytes in a MSG_OPPONENT_MOVE payload: coordinate + 1-byte TurnResult */
 #define OPPONENT_MOVE_WIRE_SIZE (COORD_SIZE + 1)
 
 /* ── Message types ──────────────────────────────────────────────────────── */
@@ -60,7 +60,7 @@ typedef enum {
 typedef struct {
     uint8_t  type;
     uint8_t  status;
-    uint16_t length;   /* network byte order */
+    uint16_t length;   
 } MsgHeader;
 
 #define MSG_HEADER_SIZE 4  /* sizeof(MsgHeader) as sent on the wire */
@@ -68,29 +68,29 @@ typedef struct {
 /* ── Exact socket I/O ───────────────────────────────────────────────────────── */
 
 /*
- * Read exactly n bytes from fd into buf.
- * Returns n on success, 0 on clean EOF, -1 on error.
+ * Read exactly n bytes from fd into buf
+ * Returns n on success, 0 on clean EOF, -1 on error
  */
 ssize_t read_exact(int fd, void *buf, size_t n);
 
 /*
- * Write exactly n bytes from buf to fd.
- * Returns n on success, -1 on error.
+ * Write exactly n bytes from buf to fd
+ * Returns n on success, -1 on error
  */
 ssize_t write_exact(int fd, const void *buf, size_t n);
 
 /*
- * Send a framed message: write 4-byte header then payload bytes.
- * payload may be NULL when length is 0.
- * Returns 0 on success, -1 on error.
+ * Send a framed message: write 4-byte header then payload bytes
+ * payload may be NULL when length is 0
+ * Returns 0 on success, -1 on error
  */
 int send_msg(int fd, uint8_t type, uint8_t status, const void *payload, uint16_t length);
 
 /*
- * Receive a framed message: read 4-byte header then payload bytes.
+ * Receive a framed message: read 4-byte header then payload bytes
  * On success, *out_hdr is filled and *out_payload points to a heap-allocated
- * buffer of hdr.length bytes (caller must free), or NULL if length is 0.
- * Returns 0 on success, 0-on-EOF returns -1, -1 on error.
+ * buffer of hdr.length bytes (caller must free), or NULL if length is 0
+ * Returns 0 on success, 0-on-EOF returns -1, -1 on error
  */
 int receive_msg(int fd, MsgHeader *out_hdr, void **out_payload);
 

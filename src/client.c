@@ -58,7 +58,7 @@ bool client_connect(ClientImplementation *client, const char *addr, uint16_t por
     }
     freeaddrinfo(res);
 
-    /* Send JOIN with game_id in network byte order. */
+    /* Send JOIN with game_id in network byte order */
     uint32_t game_id_be = htonl(game_id);
     if (send_msg(fd, MSG_JOIN, STATUS_OK,
                  &game_id_be, sizeof(uint32_t)) < 0) {
@@ -66,7 +66,7 @@ bool client_connect(ClientImplementation *client, const char *addr, uint16_t por
         return false;
     }
 
-    /* Wait for JOIN_ACCEPTED. */
+    /* Wait for JOIN_ACCEPTED */
     MsgHeader hdr = {0};
     void *payload = NULL;
     if (receive_msg(fd, &hdr, &payload) < 0) {
@@ -97,8 +97,6 @@ void client_close(ClientImplementation *client) {
     }
     free(c);
 }
-
-/* ── Stubs (TODO: add implementation) ────────────────────────────────────── */
 
 bool client_wait_for_opponent(ClientImplementation *client) {
     if (!client) return false;
