@@ -11,6 +11,12 @@
 #include "engine.h"
 #include "server_game.h"
 
+/* ── Engine mutex ───────────────────────────────────────────────────────── */
+
+/* One global mutex serialises all engine calls.
+ * Never held while blocking on socket I/O. */
+static pthread_mutex_t engine_mutex = PTHREAD_MUTEX_INITIALIZER;
+
 /* ── Thread types ───────────────────────────────────────────────────────── */
 
 typedef struct {
@@ -25,7 +31,7 @@ typedef struct {
  * Accept one client and read its MSG_JOIN.
  * Returns the client fd on success, -1 on failure.
  * Sets *out_game_id to the game_id sent by the client.
- * Does NOT send any response — caller decides acceptance or rejection.
+ * Does not send any response, caller decides acceptance or rejection.
  */
 static int accept_and_read_join(int listen_fd, uint32_t *out_game_id) {
     struct sockaddr_in ca = {0};
@@ -190,10 +196,12 @@ static void run_game_for_pair(Engine *engine,
         }
 
         /* Place P1's ships first; engine assigns player numbers by call order */
+        pthread_mutex_lock(&engine_mutex);
         int8_t r1 = engine_place_ships(engine, g.game_id,
                                         (const Ship (*)[4])p1_ships);
         int8_t r2 = engine_place_ships(engine, g.game_id,
                                         (const Ship (*)[4])p2_ships);
+        pthread_mutex_unlock(&engine_mutex);
 
         if (r1 < 0 || r2 < 0) {
             fprintf(stderr, "engine_place_ships failed (r1=%d r2=%d)\n", r1, r2);
@@ -270,9 +278,11 @@ static void run_game_for_pair(Engine *engine,
         TurnResult result;
 
         if (extended) {
+            pthread_mutex_lock(&engine_mutex);
             ExtendedTurnResult ext = engine_take_turn_extended(engine, g.game_id,
                                                                g.current_turn, coord);
             result = engine_extract_turn_result(ext);
+            pthread_mutex_unlock(&engine_mutex);
 
             if (result == Invalid) {
                 fprintf(stderr, "engine_take_turn_extended returned Invalid "
@@ -292,6 +302,7 @@ static void run_game_for_pair(Engine *engine,
             engine_free_extended_result(ext);
         } else {
             result = engine_take_turn(engine, g.game_id, g.current_turn, coord);
+            pthread_mutex_unlock(&engine_mutex);
 
             if (result == Invalid) {
                 fprintf(stderr, "engine_take_turn returned Invalid "
@@ -329,7 +340,9 @@ static void run_game_for_pair(Engine *engine,
     }
 
 game_end:
+    pthread_mutex_lock(&engine_mutex);
     engine_end_game(engine, g.game_id);
+    pthread_mutex_unlock(&engine_mutex);
     if (g.p1_fd >= 0) close(g.p1_fd);
     if (g.p2_fd >= 0) close(g.p2_fd);
 }
@@ -353,7 +366,10 @@ void run_game(Engine *engine, int listen_fd) {
     /* Initialise the engine game right after P1 joins, before accepting P2.
      * This allows the server to reject P1 immediately when engine init fails
      * (e.g. ENGINE_MODE=fail_init) instead of hanging waiting for P2. */
-    if (!engine_init_game(engine, game_id)) {
+    pthread_mutex_lock(&engine_mutex);
+    int init_ok = engine_init_game(engine, game_id);
+    pthread_mutex_unlock(&engine_mutex);
+    if (!init_ok) {
         fprintf(stderr, "engine_init_game failed for game_id=%u\n", game_id);
         send_msg(p1_fd, MSG_ERROR, STATUS_ENGINE_FAIL, NULL, 0);
         close(p1_fd);
@@ -414,7 +430,11 @@ void run_game(Engine *engine, int listen_fd) {
     return;
 
 cleanup:
-    if (game_inited) engine_end_game(engine, game_id);
+    if (game_inited) {
+        pthread_mutex_lock(&engine_mutex);
+        engine_end_game(engine, game_id);
+        pthread_mutex_unlock(&engine_mutex);
+    }
     if (p1_fd >= 0) close(p1_fd);
     if (p2_fd >= 0) close(p2_fd);
 }
