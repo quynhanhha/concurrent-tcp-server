@@ -1,4 +1,5 @@
 #include <netinet/in.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -53,7 +54,7 @@ int main(int argc, char *argv[]) {
         exit(3);
     }
 
-    if (listen(sockfd, 8) < 0) {
+    if (listen(sockfd, 64) < 0) {
         perror("listen");
         engine_free(engine);
         exit(3);
@@ -62,6 +63,29 @@ int main(int argc, char *argv[]) {
     fprintf(stderr, "Listening on port %ld\n", port);
 
     while (1) {
-        run_game(engine, sockfd);
+        int client_fd = accept(sockfd, NULL, NULL);
+        if (client_fd < 0) {
+            perror("accept");
+            continue;
+        }
+
+        JoinHandlerArgs *args = malloc(sizeof(JoinHandlerArgs));
+        if (!args) {
+            close(client_fd);
+            continue;
+        }
+        args->engine = engine;
+        args->fd     = client_fd;
+
+        pthread_t tid;
+        pthread_attr_t attr;
+        pthread_attr_init(&attr);
+        pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+        if (pthread_create(&tid, &attr, join_handler_fn, args) != 0) {
+            perror("pthread_create");
+            free(args);
+            close(client_fd);
+        }
+        pthread_attr_destroy(&attr);
     }
 }

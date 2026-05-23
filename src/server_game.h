@@ -1,24 +1,22 @@
 #ifndef SERVER_GAME_H
 #define SERVER_GAME_H
 
-#include <stdint.h>
 #include "engine.h"
 
-/* All mutable state for one game instance. */
+/*
+ * Argument block for each detached join-handler thread spawned by main().
+ * The thread frees this after copying out its fields.
+ */
 typedef struct {
-    uint32_t game_id;
-    int      p1_fd;
-    int      p2_fd;
-    int      game_inited;  /* 1 after engine_init_game succeeds */
-    uint8_t  current_turn; /* 1 or 2; set to 1 after ship placement */
-    int      game_over;    /* 1 once engine reports a win */
-} GameState;
+    Engine *engine;
+    int     fd;
+} JoinHandlerArgs;
 
 /*
- * Run one complete game on listen_fd.
- * Accepts two clients, plays through all phases, then returns.
- * The while(1) loop in main() immediately starts the next game.
+ * Entry point for a detached per-client join-handler thread.
+ * Reads the MSG_JOIN, matches or registers the client in the pending/active
+ * registries, and when a pair is formed, spawns a detached game thread.
  */
-void run_game(Engine *engine, int listen_fd);
+void *join_handler_fn(void *arg);
 
 #endif /* SERVER_GAME_H */
