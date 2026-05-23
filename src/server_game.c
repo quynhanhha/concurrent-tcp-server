@@ -141,10 +141,19 @@ static void run_game_for_pair(Engine *engine,
             game_id, p1_fd, p2_fd);
 
     /* Both players already received MSG_JOIN_ACCEPTED from their join handlers.
-     * Notify them the game is ready to start. */
-    if (send_msg(g.p1_fd, MSG_GAME_READY, STATUS_OK, NULL, 0) < 0 ||
-        send_msg(g.p2_fd, MSG_GAME_READY, STATUS_OK, NULL, 0) < 0) {
-        fprintf(stderr, "Failed to send GAME_READY for game %u\n", game_id);
+     * Notify them the game is ready to start.
+     * Check each send separately: if P1 is stale we explicitly notify P2
+     * with MSG_ERROR before cleaning up, so it gets a clean failure rather
+     * than a silent EOF. */
+    if (send_msg(g.p1_fd, MSG_GAME_READY, STATUS_OK, NULL, 0) < 0) {
+        fprintf(stderr, "Game %u: P1 (fd%d) stale — notifying P2 and cleaning up\n",
+                game_id, p1_fd);
+        send_msg(g.p2_fd, MSG_ERROR, STATUS_DISCONNECTED, NULL, 0);
+        goto game_end;
+    }
+    if (send_msg(g.p2_fd, MSG_GAME_READY, STATUS_OK, NULL, 0) < 0) {
+        fprintf(stderr, "Game %u: P2 (fd%d) stale — cleaning up\n",
+                game_id, p2_fd);
         goto game_end;
     }
     fprintf(stderr, "Game %u ready\n", game_id);

@@ -61,6 +61,7 @@ int main(int argc, char *argv[]) {
     }
 
     fprintf(stderr, "Listening on port %ld\n", port);
+    fprintf(stderr, "MULTIPLE_GAMES\n");
 
     while (1) {
         int client_fd = accept(sockfd, NULL, NULL);
