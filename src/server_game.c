@@ -92,56 +92,19 @@ static void reject_extra_connection(int listen_fd) {
     close(fd);
 }
 
-void run_game(Engine *engine, int listen_fd) {
-    GameState g = {0, -1, -1, 0, 0, 0};
+/*
+ * Run the GAME_READY → ship placement → gameplay pipeline for two already-
+ * matched and accepted players.  Takes ownership of p1_fd and p2_fd: both
+ * are closed before this function returns.
+ *
+ * Precondition: engine_init_game(engine, game_id) has already succeeded.
+ */
+static void run_game_for_pair(Engine *engine,
+                              int p1_fd, int p2_fd, uint32_t game_id,
+                              int listen_fd) {
+    GameState g = {game_id, p1_fd, p2_fd, 1 /* game_inited */, 0, 0};
 
-    /* Accept Player 1: any game_id is valid as the session's ID. */
-    uint32_t p1_game_id = 0;
-    g.p1_fd = accept_and_read_join(listen_fd, &p1_game_id);
-    if (g.p1_fd < 0) return;
-    g.game_id = p1_game_id;
-
-    /* Initialise the engine game right after P1 joins, before accepting P2.
-     * This allows the server to reject P1 immediately when engine init fails
-     * (e.g. ENGINE_MODE=fail_init) instead of hanging waiting for P2. */
-    if (!engine_init_game(engine, g.game_id)) {
-        fprintf(stderr, "engine_init_game failed for game_id=%u\n", g.game_id);
-        send_msg(g.p1_fd, MSG_ERROR, STATUS_ENGINE_FAIL, NULL, 0);
-        close(g.p1_fd);
-        return;  /* game_inited is still 0 — no engine cleanup required */
-    }
-    g.game_inited = 1;
-
-    /* Send JOIN_ACCEPTED to P1 so client_connect can return before P2 arrives. */
-    if (send_msg(g.p1_fd, MSG_JOIN_ACCEPTED, STATUS_OK, NULL, 0) < 0) {
-        goto game_end;
-    }
-    fprintf(stderr, "P1 joined (game_id=%u, fd=%d)\n", g.game_id, g.p1_fd);
-
-    /* Accept Player 2: must present the same game_id as P1. */
-    uint32_t p2_game_id = 0;
-    g.p2_fd = accept_and_read_join(listen_fd, &p2_game_id);
-    if (g.p2_fd < 0) {
-        send_msg(g.p1_fd, MSG_ERROR, STATUS_PROTOCOL_ERROR, NULL, 0);
-        goto game_end;
-    }
-
-    if (p2_game_id != g.game_id) {
-        fprintf(stderr, "Game ID mismatch: P1=%u P2=%u\n", g.game_id, p2_game_id);
-        send_msg(g.p2_fd, MSG_JOIN_REJECTED, STATUS_PROTOCOL_ERROR, NULL, 0);
-        send_msg(g.p1_fd, MSG_ERROR, STATUS_PROTOCOL_ERROR, NULL, 0);
-        close(g.p2_fd);
-        g.p2_fd = -1;
-        goto game_end;
-    }
-
-    if (send_msg(g.p2_fd, MSG_JOIN_ACCEPTED, STATUS_OK, NULL, 0) < 0) {
-        send_msg(g.p1_fd, MSG_ERROR, STATUS_PROTOCOL_ERROR, NULL, 0);
-        goto game_end;
-    }
-    fprintf(stderr, "P2 joined (game_id=%u, fd=%d)\n", p2_game_id, g.p2_fd);
-
-    /* Notify both players — engine was already initialised after P1 joined. */
+    /* Notify both players */
     if (send_msg(g.p1_fd, MSG_GAME_READY, STATUS_OK, NULL, 0) < 0 ||
         send_msg(g.p2_fd, MSG_GAME_READY, STATUS_OK, NULL, 0) < 0) {
         fprintf(stderr, "Failed to send GAME_READY\n");
@@ -182,7 +145,7 @@ void run_game(Engine *engine, int listen_fd) {
             /* Handle whichever fd(s) are ready. */
             int fds[2]   = {g.p1_fd,  g.p2_fd};
             int *done[2] = {&p1_done, &p2_done};
-            Ship  (*ships[2])[4]          = {&p1_ships,  &p2_ships};
+            Ship  (*ships[2])[4]              = {&p1_ships,  &p2_ships};
             char  (*coords[2])[4][COORD_SIZE] = {&p1_coords, &p2_coords};
             const char *names[2] = {"P1", "P2"};
 
@@ -245,6 +208,8 @@ void run_game(Engine *engine, int listen_fd) {
         int active_fd = (g.current_turn == 1) ? g.p1_fd : g.p2_fd;
         int other_fd  = (g.current_turn == 1) ? g.p2_fd : g.p1_fd;
 
+        /* Use select so we can service extra-connection rejections while
+         * waiting for the active player's move. */
         {
             fd_set rfds;
             FD_ZERO(&rfds);
@@ -353,7 +318,65 @@ void run_game(Engine *engine, int listen_fd) {
     }
 
 game_end:
-    if (g.game_inited) engine_end_game(engine, g.game_id);
+    engine_end_game(engine, g.game_id);
     if (g.p1_fd >= 0) close(g.p1_fd);
     if (g.p2_fd >= 0) close(g.p2_fd);
+}
+
+void run_game(Engine *engine, int listen_fd) {
+    int p1_fd = -1, p2_fd = -1;
+    uint32_t game_id = 0;
+    int game_inited = 0;
+
+    /* Accept Player 1: any game_id is valid as the session's ID. */
+    p1_fd = accept_and_read_join(listen_fd, &game_id);
+    if (p1_fd < 0) return;
+
+    /* Initialise the engine game right after P1 joins, before accepting P2.
+     * This allows the server to reject P1 immediately when engine init fails
+     * (e.g. ENGINE_MODE=fail_init) instead of hanging waiting for P2. */
+    if (!engine_init_game(engine, game_id)) {
+        fprintf(stderr, "engine_init_game failed for game_id=%u\n", game_id);
+        send_msg(p1_fd, MSG_ERROR, STATUS_ENGINE_FAIL, NULL, 0);
+        close(p1_fd);
+        return;  /* game_inited is still 0 — no engine cleanup required */
+    }
+    game_inited = 1;
+
+    /* Send JOIN_ACCEPTED to P1 so client_connect can return before P2 arrives. */
+    if (send_msg(p1_fd, MSG_JOIN_ACCEPTED, STATUS_OK, NULL, 0) < 0)
+        goto cleanup;
+    fprintf(stderr, "P1 joined (game_id=%u, fd=%d)\n", game_id, p1_fd);
+
+    /* Accept Player 2: must present the same game_id as P1. */
+    uint32_t p2_game_id = 0;
+    p2_fd = accept_and_read_join(listen_fd, &p2_game_id);
+    if (p2_fd < 0) {
+        send_msg(p1_fd, MSG_ERROR, STATUS_PROTOCOL_ERROR, NULL, 0);
+        goto cleanup;
+    }
+
+    if (p2_game_id != game_id) {
+        fprintf(stderr, "Game ID mismatch: P1=%u P2=%u\n", game_id, p2_game_id);
+        send_msg(p2_fd, MSG_JOIN_REJECTED, STATUS_PROTOCOL_ERROR, NULL, 0);
+        send_msg(p1_fd, MSG_ERROR, STATUS_PROTOCOL_ERROR, NULL, 0);
+        close(p2_fd);
+        p2_fd = -1;
+        goto cleanup;
+    }
+
+    if (send_msg(p2_fd, MSG_JOIN_ACCEPTED, STATUS_OK, NULL, 0) < 0) {
+        send_msg(p1_fd, MSG_ERROR, STATUS_PROTOCOL_ERROR, NULL, 0);
+        goto cleanup;
+    }
+    fprintf(stderr, "P2 joined (game_id=%u, fd=%d)\n", p2_game_id, p2_fd);
+
+    /* Ownership of p1_fd and p2_fd transfers to run_game_for_pair. */
+    run_game_for_pair(engine, p1_fd, p2_fd, game_id, listen_fd);
+    return;
+
+cleanup:
+    if (game_inited) engine_end_game(engine, game_id);
+    if (p1_fd >= 0) close(p1_fd);
+    if (p2_fd >= 0) close(p2_fd);
 }
