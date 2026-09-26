@@ -1,9 +1,20 @@
-LIBENGINE=project2-bin/libengine.a
-LIBRUNNER=project2-bin/librunner.a
+ENGINE_DIR ?= project2-bin
+ARCH ?= $(shell uname -m)
+
+ifeq ($(ARCH),arm64)
+LIB_DIR = $(ENGINE_DIR)/arm64
+else ifeq ($(ARCH),aarch64)
+LIB_DIR = $(ENGINE_DIR)/arm64
+else
+LIB_DIR = $(ENGINE_DIR)
+endif
+
+LIBENGINE = $(LIB_DIR)/libengine.a
+LIBRUNNER = $(LIB_DIR)/librunner.a
 
 CC=cc
 CFLAGS=-Wall -Isrc
-LDFLAGS=-lpthread
+LDFLAGS=-pthread
 
 all: client.a server.a
 
@@ -30,4 +41,7 @@ src/%.o: src/%.c
 clean:
 	rm -f src/*.o client.a server.a client server
 
-.PHONY: all clean
+test:
+	python3 tests/run_tests.py
+
+.PHONY: all clean test

@@ -3,10 +3,14 @@ client
 server
 client.a
 server.a
+*.a
 *.o
 
-# Cloned test cases 
+# University-provided or local-only dependencies and test data
+project2-bin/
 tests/cases/
+tests/.build/
+__pycache__/
 
 # Editor / OS
 .vscode/
